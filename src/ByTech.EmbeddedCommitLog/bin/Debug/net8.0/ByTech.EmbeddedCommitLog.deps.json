@@ -1,0 +1,23 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "ByTech.EmbeddedCommitLog/0.1.0-alpha": {
+        "runtime": {
+          "ByTech.EmbeddedCommitLog.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "ByTech.EmbeddedCommitLog/0.1.0-alpha": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

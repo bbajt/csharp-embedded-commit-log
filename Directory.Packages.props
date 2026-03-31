@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup Label="Core">
+    <PackageVersion Include="System.IO.Hashing" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="xunit.v3" Version="1.0.0" />
+    <PackageVersion Include="FluentAssertions" Version="7.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Benchmarking">
+    <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />
+  </ItemGroup>
+</Project>

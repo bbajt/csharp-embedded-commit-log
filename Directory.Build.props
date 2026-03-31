@@ -1,0 +1,25 @@
+<Project>
+  <PropertyGroup Label="Build">
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- Default: nothing packable. Library project overrides to true. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package Metadata">
+    <Authors>Branimir Bajt</Authors>
+    <Company>ByTech</Company>
+    <Copyright>Copyright © 2026 Branimir Bajt</Copyright>
+    <Description>Native C# Persisted Embedded Commit Log</Description>
+    <PackageProjectUrl>https://github.com/bbajt/csharp-embedded-commit-log</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/bbajt/csharp-embedded-commit-log</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>commit-log;embedded;append-only;event-sourcing;wal;dotnet;csharp</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+</Project>
