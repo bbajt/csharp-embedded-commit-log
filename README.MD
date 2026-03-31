@@ -1,4 +1,4 @@
-# ByTech.EmbeddedCommitLog
+# Persistent Embedded Commit Log (PECL)
 
 [![NuGet](https://img.shields.io/nuget/v/ByTech.EmbeddedCommitLog)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.MD)
