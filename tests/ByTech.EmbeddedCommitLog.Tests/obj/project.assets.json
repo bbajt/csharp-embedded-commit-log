@@ -1141,43 +1141,36 @@
     ]
   },
   "packageFolders": {
-    "C:\\Users\\Developer\\.nuget\\packages\\": {},
-    "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages": {}
+    "/root/.nuget/packages/": {}
   },
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\tests\\ByTech.EmbeddedCommitLog.Tests\\ByTech.EmbeddedCommitLog.Tests.csproj",
+      "projectUniqueName": "/src/tests/ByTech.EmbeddedCommitLog.Tests/ByTech.EmbeddedCommitLog.Tests.csproj",
       "projectName": "ByTech.EmbeddedCommitLog.Tests",
-      "projectPath": "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\tests\\ByTech.EmbeddedCommitLog.Tests\\ByTech.EmbeddedCommitLog.Tests.csproj",
-      "packagesPath": "C:\\Users\\Developer\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\tests\\ByTech.EmbeddedCommitLog.Tests\\obj\\",
+      "projectPath": "/src/tests/ByTech.EmbeddedCommitLog.Tests/ByTech.EmbeddedCommitLog.Tests.csproj",
+      "packagesPath": "/root/.nuget/packages/",
+      "outputPath": "/src/tests/ByTech.EmbeddedCommitLog.Tests/obj/",
       "projectStyle": "PackageReference",
       "centralPackageVersionsManagementEnabled": true,
-      "fallbackFolders": [
-        "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
-      ],
       "configFilePaths": [
-        "C:\\Users\\Developer\\AppData\\Roaming\\NuGet\\NuGet.Config",
-        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
-        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        "/root/.nuget/NuGet/NuGet.Config"
       ],
       "originalTargetFrameworks": [
         "net9.0"
       ],
       "sources": {
-        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
         "https://api.nuget.org/v3/index.json": {}
       },
       "frameworks": {
         "net9.0": {
           "targetAlias": "net9.0",
           "projectReferences": {
-            "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\src\\ByTech.EmbeddedCommitLog\\ByTech.EmbeddedCommitLog.csproj": {
-              "projectPath": "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\src\\ByTech.EmbeddedCommitLog\\ByTech.EmbeddedCommitLog.csproj"
+            "/src/src/ByTech.EmbeddedCommitLog/ByTech.EmbeddedCommitLog.csproj": {
+              "projectPath": "/src/src/ByTech.EmbeddedCommitLog/ByTech.EmbeddedCommitLog.csproj"
             },
-            "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\tests\\ByTech.EmbeddedCommitLog.TestUtilities\\ByTech.EmbeddedCommitLog.TestUtilities.csproj": {
-              "projectPath": "C:\\Users\\Developer\\source\\repos\\EmbeddedCommitLog\\tests\\ByTech.EmbeddedCommitLog.TestUtilities\\ByTech.EmbeddedCommitLog.TestUtilities.csproj"
+            "/src/tests/ByTech.EmbeddedCommitLog.TestUtilities/ByTech.EmbeddedCommitLog.TestUtilities.csproj": {
+              "projectPath": "/src/tests/ByTech.EmbeddedCommitLog.TestUtilities/ByTech.EmbeddedCommitLog.TestUtilities.csproj"
             }
           }
         }
@@ -1237,7 +1230,7 @@
             "privateAssets": "all"
           }
         },
-        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.312/PortableRuntimeIdentifierGraph.json"
+        "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/9.0.312/PortableRuntimeIdentifierGraph.json"
       }
     }
   }

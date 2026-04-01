@@ -15,7 +15,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCopyrightAttribute("Copyright © 2026 Branimir Bajt")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Native C# Persisted Embedded Commit Log")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5ea69a16c07c53373a1cb757db230bf9a4ce0fe8")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+98dc6abc4aea7b659004c96e18eba6a1338b5a65")]
 [assembly: System.Reflection.AssemblyProductAttribute("ByTech.EmbeddedCommitLog.TestUtilities")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ByTech.EmbeddedCommitLog.TestUtilities")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

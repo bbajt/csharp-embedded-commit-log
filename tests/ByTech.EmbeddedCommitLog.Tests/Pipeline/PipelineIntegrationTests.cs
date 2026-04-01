@@ -498,21 +498,28 @@ public sealed class PipelineIntegrationTests
     /// (pipeline reaches Stopped or Error, not Draining).
     /// </summary>
     /// <remarks>
-    /// The timeout is triggered by filling the sink lane (capacity=1) with a blocking sink so the
-    /// reader loop is stuck in <c>RouteAsync(CancellationToken.None)</c> and cannot observe the
-    /// cancelled CancellationToken. The 30 ms sleep after the delivery latch gives the reader time
-    /// to advance past record 1 and reach the full-lane block on record 2 before Stop() is called.
+    /// The timeout is triggered by filling the sink lane (capacity=1) with a permanently-blocking
+    /// sink (released by <c>sinkReleaser</c>) so the reader loop is stuck in
+    /// <c>RouteAsync(CancellationToken.None)</c> and cannot observe the cancelled
+    /// CancellationToken. Because the sink never completes on its own, <c>Stop()</c> is run on a
+    /// background task (it blocks on <c>Task.WaitAll(sinkTasks)</c> with no timeout after the
+    /// drain fires). A 1 000 ms sleep gives the drain timeout generous headroom even on a
+    /// heavily-loaded 2-CPU CI runner before the releaser unblocks the sink.
     /// </remarks>
     [Fact]
-    public void Stop_DrainTimeoutExceeded_ThrowsAggregateContainingPeclDrainTimeoutException()
+    public async Task Stop_DrainTimeoutExceeded_ThrowsAggregateContainingPeclDrainTimeoutException()
     {
-        // RunSinkTaskAsync calls WriteAsync with CancellationToken.None, so the sink task
-        // only exits after Lane.Complete() drains all remaining records. The sink must
-        // therefore be slow-but-finite (not blocking forever): 200 ms per batch, CT.None.
-        //
         // Mechanism: SinkLaneCapacity=1 fills the lane so the reader loop blocks in
         // RouteAsync(CancellationToken.None) and cannot observe CTS cancellation.
-        // DrainTimeoutMs=50 fires before the 200 ms sink finishes the first batch.
+        // DrainTimeoutMs=50 fires because the sink never finishes until sinkReleaser is set.
+        //
+        // Stop() is called on a background Task because after the drain timeout it calls
+        // Task.WaitAll(sinkTasks) with no timeout — it would deadlock the test thread if
+        // the sink is still blocking.
+        //
+        // Synchronisation: deliveryLatch fires on the first sink call so we know the lane
+        // is occupied (SinkLaneCapacity=1) and the reader is blocked in WriteAsync(CT.None)
+        // trying to route the next record. At that point the drain is guaranteed to time out.
         using var dir = new TempDirectory();
         var config = new PipelineConfiguration
         {
@@ -523,13 +530,13 @@ public sealed class PipelineIntegrationTests
             GcStopTimeoutMs = 200,
         };
 
-        // Slow sink: 200 ms per batch using CancellationToken.None (matches pipeline usage).
-        // Sets latch on first call so the test knows the lane-filling sequence has started.
+        // Blocking sink: signals on first delivery then blocks until sinkReleaser is set.
         using var deliveryLatch = new ManualResetEventSlim(false);
+        var sinkReleaser = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var sink = new CallbackSink(async (_, _) =>
         {
             deliveryLatch.Set();
-            await Task.Delay(200, CancellationToken.None);
+            await sinkReleaser.Task;
         });
 
         using var pipeline = new PeclPipeline(config);
@@ -543,14 +550,38 @@ public sealed class PipelineIntegrationTests
         }
         pipeline.Flush();
 
-        bool latched = deliveryLatch.Wait(5_000, TestContext.Current.CancellationToken);
-        latched.Should().BeTrue("sink must receive the first record before Stop() is called");
+        // Wait for first delivery: the lane is now occupied and RunSinkTaskAsync is blocked.
+        // The reader has routed record 1 and is blocked in WriteAsync(record 2, CT.None).
+        bool latched = deliveryLatch.Wait(10_000, TestContext.Current.CancellationToken);
+        latched.Should().BeTrue("sink must receive at least one record before Stop() is called");
 
-        // Give the reader time to route record 1 into the now-empty lane and then block
-        // trying to route record 2 into the full lane (RouteAsync uses CancellationToken.None).
-        Thread.Sleep(20);
+        // Run Stop() on a background task — it will block on Task.WaitAll(sinkTasks) after
+        // the drain timeout fires, so it must not run on the test thread.
+        AggregateException? stopException = null;
+        Task stopTask = Task.Run(() =>
+        {
+            try
+            {
+                pipeline.Stop();
+            }
+            catch (AggregateException ex)
+            {
+                stopException = ex;
+            }
+        }, TestContext.Current.CancellationToken);
 
-        AggregateException ae = Assert.Throws<AggregateException>(() => pipeline.Stop());
+        // Give the drain timeout (50 ms) generous headroom on a loaded 2-CPU CI runner.
+        // K×50 ms must be < 1 000 ms for any realistic scheduling multiplier K.
+        await Task.Delay(1_000, TestContext.Current.CancellationToken);
+
+        // Release the sink so Stop() can finish Task.WaitAll(sinkTasks) and complete cleanup.
+        sinkReleaser.TrySetResult();
+
+        // WaitAsync throws TimeoutException if Stop() does not complete — that failure is clear.
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        stopException.Should().NotBeNull("Stop() must throw AggregateException when drain times out");
+        AggregateException ae = stopException!;
 
         ae.InnerExceptions.Should().ContainSingle(
             e => e is PeclDrainTimeoutException,
