@@ -16,9 +16,14 @@ namespace ByTech.EmbeddedCommitLog.LedgerSample;
 /// read-side view rebuilt by replaying a shared, ordered log.
 /// </para>
 /// <para>
-/// <see cref="Record.Header.SeqNo"/> is the record's global position in the pipeline —
+/// <see cref="Statement.SeqNo"/> is the record's global position in the pipeline —
 /// the same sequence number appears in every consumer's view of the log, making it
 /// straightforward to correlate entries across accounts.
+/// </para>
+/// <para>
+/// Pass <paramref name="initialBalance"/> when restarting a pipeline from a previously
+/// saved cursor position. The sink will project from that starting balance, receiving
+/// only the records that were posted after the cursor was last flushed to disk.
 /// </para>
 /// </remarks>
 public sealed class AccountSink : ISink
@@ -31,7 +36,16 @@ public sealed class AccountSink : ISink
     private decimal _balance;
 
     /// <summary>Initialises the sink for the given account.</summary>
-    public AccountSink(string accountId) => _accountId = accountId;
+    /// <param name="accountId">Account ID to project (e.g. "ACC-001").</param>
+    /// <param name="initialBalance">
+    /// Starting balance carried forward from a previous pipeline run.
+    /// Defaults to zero for a brand-new account.
+    /// </param>
+    public AccountSink(string accountId, decimal initialBalance = 0m)
+    {
+        _accountId = accountId;
+        _balance = initialBalance;
+    }
 
     /// <summary>Account identifier this sink projects.</summary>
     public string AccountId => _accountId;

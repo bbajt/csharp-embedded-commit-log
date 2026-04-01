@@ -27,7 +27,12 @@ public sealed record LedgerEntry(
     public byte[] Serialize() =>
         JsonSerializer.SerializeToUtf8Bytes(this, _jsonOptions);
 
-    /// <summary>Deserialises a <see cref="LedgerEntry"/> from a UTF-8 JSON payload byte array.</summary>
-    public static LedgerEntry Deserialize(byte[] payload) =>
+    /// <summary>Deserialises a <see cref="LedgerEntry"/> from a UTF-8 JSON payload.</summary>
+    /// <remarks>
+    /// Accepts <see cref="byte"/>[] (push-mode <c>LogRecord.Payload</c>) and
+    /// <see cref="ReadOnlySpan{T}"/> (pull-mode <c>RecordReadResult.Payload.Span</c>)
+    /// without allocating an intermediate array.
+    /// </remarks>
+    public static LedgerEntry Deserialize(ReadOnlySpan<byte> payload) =>
         JsonSerializer.Deserialize<LedgerEntry>(payload, _jsonOptions)!;
 }
