@@ -1272,6 +1272,16 @@
             to prevent the callback from iterating a collection being cleared concurrently.
             </summary>
         </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Pipeline.Pipeline._checkpointLock">
+            <summary>
+            Serialises all calls to <see cref="M:ByTech.EmbeddedCommitLog.Checkpoint.CheckpointWriter.Write(System.String,ByTech.EmbeddedCommitLog.Checkpoint.CheckpointData)"/> so that the
+            background Batched-mode flush timer and an explicit <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Flush"/> (or a
+            rollover <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.WriteCheckpointCore(System.UInt32,System.Int64,System.UInt64,System.UInt32)"/>) cannot open <c>checkpoint.tmp</c>
+            concurrently.  On Linux <c>FileShare.None</c> is enforced within the same
+            process by the BCL's internal file-handle table, causing an
+            <see cref="T:System.IO.IOException"/> on the second opener without this lock.
+            </summary>
+        </member>
         <member name="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.State">
             <summary>Current lifecycle state of the pipeline.</summary>
         </member>

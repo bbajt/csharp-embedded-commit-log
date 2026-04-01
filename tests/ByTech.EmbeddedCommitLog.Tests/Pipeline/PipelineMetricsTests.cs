@@ -46,7 +46,13 @@ public sealed class PipelineMetricsTests
     public void Flush_IncrementsFlushCount()
     {
         using var dir = new TempDirectory();
-        using var pipeline = new PeclPipeline(MakeConfig(dir.Path));
+        // FsyncIntervalMs = 60_000 prevents the background Batched-mode timer from
+        // firing during the test and adding unexpected extra FlushCount increments.
+        using var pipeline = new PeclPipeline(new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            FsyncIntervalMs = 60_000,
+        });
         pipeline.Start();
 
         pipeline.Append("data"u8);
@@ -642,10 +648,13 @@ public sealed class PipelineMetricsTests
     public void Metrics_BatchSize_RecordedOnFlush()
     {
         using var dir = new TempDirectory();
+        // FsyncIntervalMs = 60_000 prevents the background Batched-mode timer from
+        // firing during the test and adding unexpected extra measurements.
         var config = new PipelineConfiguration
         {
             RootDirectory = dir.Path,
             MeterName = $"pecl-bs-{Guid.NewGuid():N}",
+            FsyncIntervalMs = 60_000,
         };
         var (listener, measurements) = SetupLongListListener(config.MeterName, "pecl.write.batch_size");
 

@@ -67,6 +67,16 @@ public sealed class Pipeline : IDisposable
     /// </summary>
     private readonly object _observabilityLock = new();
 
+    /// <summary>
+    /// Serialises all calls to <see cref="CheckpointWriter.Write"/> so that the
+    /// background Batched-mode flush timer and an explicit <see cref="Flush"/> (or a
+    /// rollover <see cref="WriteCheckpointCore"/>) cannot open <c>checkpoint.tmp</c>
+    /// concurrently.  On Linux <c>FileShare.None</c> is enforced within the same
+    /// process by the BCL's internal file-handle table, causing an
+    /// <see cref="IOException"/> on the second opener without this lock.
+    /// </summary>
+    private readonly object _checkpointLock = new();
+
     /// <summary>Current lifecycle state of the pipeline.</summary>
     public PipelineState State { get; private set; } = PipelineState.Stopped;
 
@@ -1311,9 +1321,21 @@ public sealed class Pipeline : IDisposable
 
         if (result.IsFailure && result.Error.Code == PeclErrorCode.TruncatedHeader)
         {
-            // Clean end-of-segment — advance to the next segment.
             cs.Reader.Dispose();
             cs.Reader = null;
+
+            // TruncatedHeader on the ACTIVE segment means the reader hit the
+            // writer's unflushed zone: BytesWritten (updated atomically by Append)
+            // advanced ahead of the OS-visible file size. Advancing CurrentSegmentId
+            // here would produce a FileNotFoundException on the non-existent next
+            // segment. Return EndOfLog instead — the reader will retry on the next
+            // poll cycle after the data has been flushed to disk.
+            if (cs.CurrentSegmentId == _writer!.SegmentId)
+            {
+                return Result<RecordReadResult, PeclError>.Fail(PeclError.EndOfLog(cs.ConsumerName));
+            }
+
+            // Clean end-of-sealed-segment — advance to the next segment.
             cs.CurrentSegmentId++;
             cs.CurrentOffset = 0;
 
@@ -1589,9 +1611,12 @@ public sealed class Pipeline : IDisposable
     /// </remarks>
     private void WriteCheckpointCore(uint lastSegId, long lastOffset, ulong lastSeqNo, uint activeSegId)
     {
-        CheckpointWriter.Write(
-            _config.RootDirectory,
-            new CheckpointData(lastSegId, lastOffset, lastSeqNo, activeSegId));
+        lock (_checkpointLock)
+        {
+            CheckpointWriter.Write(
+                _config.RootDirectory,
+                new CheckpointData(lastSegId, lastOffset, lastSeqNo, activeSegId));
+        }
     }
 
     private void WriteCheckpoint()
