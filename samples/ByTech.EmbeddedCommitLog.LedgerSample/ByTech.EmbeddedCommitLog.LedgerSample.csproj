@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- TargetFramework, Nullable, TreatWarningsAsErrors inherited from Directory.Build.props -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ByTech.EmbeddedCommitLog\ByTech.EmbeddedCommitLog.csproj" />
+  </ItemGroup>
+</Project>

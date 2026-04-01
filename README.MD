@@ -148,6 +148,59 @@ while (true)
 
 ---
 
+## Samples
+
+### General Ledger — Credit / Debit Account Balances
+
+`samples/ByTech.EmbeddedCommitLog.LedgerSample` is a runnable console app that
+demonstrates PECL in a real-world payments scenario.
+
+**Scenario:**
+- A **general ledger** (producer) appends interleaved credit and debit entries for
+  three accounts — Current, Savings, and Investment — to a single ordered log.
+- Each **account** is an independent PECL consumer with its own persistent cursor.
+  Its `AccountSink` (implements `ISink`) receives the full broadcast and projects a
+  running balance by filtering on `AccountId`.
+
+This illustrates the standard **event-sourcing projection** pattern: one shared,
+durable, append-only log; many independent read-side views — no broker required.
+
+```bash
+dotnet run --project samples/ByTech.EmbeddedCommitLog.LedgerSample
+```
+
+```
+PECL General Ledger Sample
+────────────────────────────────────────────────────────────
+Data directory : /tmp/pecl-ledger-abc123
+
+Posting 12 ledger entries across 3 accounts...
+
+  Account : ACC-001  —  Current Account
+  Entries : 5   |   Closing balance : 1,275.00
+  ─────────────────────────────────────────────────────────
+  SeqNo      Posted  Reference                      T      Amount     Balance
+  ─────────────────────────────────────────────────────────
+      0  2026-04-01  Opening deposit               CR  + 1,000.00    1,000.00
+      2  2026-04-01  Rent — April                  DR  -   350.00      650.00
+      4  2026-04-01  Refund — utilities            CR  +   200.00      850.00
+      6  2026-04-01  Grocery store                 DR  -    75.00      775.00
+     11  2026-04-01  Salary deposit — April        CR  +   500.00    1,275.00
+  ─────────────────────────────────────────────────────────
+
+  ... (ACC-002 Savings, ACC-003 Investment) ...
+```
+
+The interleaved `SeqNo` values (`0, 2, 4, 6, 11` for ACC-001; `1, 5, 7, 9` for
+ACC-002) show that every consumer has an independent filtered view of the same
+globally-ordered log.
+
+The pipeline data directory is printed at the end. Re-open with the same
+`RootDirectory` and each consumer resumes from its last flushed cursor position —
+no records lost, no reprocessing from the beginning.
+
+---
+
 ## Configuration
 
 All options are set on `PipelineConfiguration` (a `sealed record` — all properties
