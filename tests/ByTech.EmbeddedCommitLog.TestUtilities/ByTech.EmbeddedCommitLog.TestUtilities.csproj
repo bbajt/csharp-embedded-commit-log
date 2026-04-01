@@ -2,6 +2,7 @@
   <PropertyGroup>
     <RootNamespace>ByTech.EmbeddedCommitLog.TestUtilities</RootNamespace>
     <IsPackable>false</IsPackable>
+    <IsTestProject>false</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>

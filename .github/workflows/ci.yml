@@ -40,13 +40,12 @@ jobs:
       - name: Run tests
         if: steps.detect-tests.outputs.has_tests == 'true'
         run: |
-          dotnet test EmbeddedCommitLog.sln \
-            --logger "trx;LogFileName=results.trx" \
-            --results-directory ./TestResults
+          dotnet run --project tests/ByTech.EmbeddedCommitLog.Tests \
+            -- --report-trx --results-directory ./TestResults
 
       - name: Upload test results
         if: steps.detect-tests.outputs.has_tests == 'true' && !cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ github.run_number }}
-          path: ./TestResults/**/*.trx
+          path: ./TestResults/*.trx
