@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO.Compression;
 
 namespace ByTech.EmbeddedCommitLog.Records;
 
@@ -96,6 +97,46 @@ public static class RecordReader
         if (storedCrc != computedCrc)
         {
             return Result<RecordReadResult, PeclError>.Fail(PeclError.CrcMismatch(storedCrc, computedCrc));
+        }
+
+        // ── 6. Decompress if flagged ──────────────────────────────────────────────
+        // When IsCompressed is set the stored payload is a frame:
+        //   [4-byte LE uint32 uncompressed length][compressed bytes...]
+        // RecordReadResult.Payload always returns raw (decompressed) bytes.
+        if ((flags & RecordFlags.IsCompressed) != 0)
+        {
+            CompressionAlgorithm algorithm = flags.GetCompressionAlgorithm();
+            if (algorithm == CompressionAlgorithm.None)
+            {
+                return Result<RecordReadResult, PeclError>.Fail(
+                    PeclError.DecompressionFailed("IsCompressed flag set but algorithm id is None."));
+            }
+
+            if (payloadBytes.Length < 4)
+            {
+                return Result<RecordReadResult, PeclError>.Fail(
+                    PeclError.DecompressionFailed(
+                        $"Compressed frame too short ({payloadBytes.Length} bytes); minimum 4 bytes for uncompressed-length prefix."));
+            }
+
+            uint uncompressedLength = BinaryPrimitives.ReadUInt32LittleEndian(payloadBytes);
+            if (uncompressedLength > (uint)int.MaxValue)
+            {
+                return Result<RecordReadResult, PeclError>.Fail(
+                    PeclError.DecompressionFailed(
+                        $"Uncompressed length {uncompressedLength} overflows int.MaxValue."));
+            }
+
+            byte[] decompressed = GC.AllocateUninitializedArray<byte>((int)uncompressedLength);
+            if (!BrotliDecoder.TryDecompress(payloadBytes.AsSpan(4), decompressed, out int written)
+                || written != (int)uncompressedLength)
+            {
+                return Result<RecordReadResult, PeclError>.Fail(
+                    PeclError.DecompressionFailed(
+                        $"Brotli decompression failed (expected {uncompressedLength} bytes, got {written})."));
+            }
+
+            payloadBytes = decompressed;
         }
 
         var header = new RecordHeader(

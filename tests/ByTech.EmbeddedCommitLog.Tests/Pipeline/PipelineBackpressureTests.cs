@@ -93,7 +93,7 @@ public sealed class PipelineBackpressureTests
         using var listener = new MeterListener();
         listener.InstrumentPublished = (instrument, l) =>
         {
-            if (instrument.Meter.Name == config.MeterName && instrument.Name == "pecl.sink.dropped")
+            if (instrument.Meter.Name == config.MeterName && instrument.Name == "pecl.sink.dropped_total")
             {
                 l.EnableMeasurementEvents(instrument);
             }

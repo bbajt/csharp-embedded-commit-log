@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using ByTech.EmbeddedCommitLog.Checkpoint;
 using ByTech.EmbeddedCommitLog.Consumer;
@@ -36,8 +37,18 @@ public sealed class Pipeline : IDisposable
     private readonly PipelineConfiguration _config;
     private readonly string _segmentsDir;
     private readonly string _cursorsDir;
+    private readonly string _spillDir;
     private readonly Dictionary<string, ConsumerState> _consumers = new();
-    private readonly BroadcastRouter _router;
+
+    /// <summary>
+    /// Preserves the names of all consumers ever registered via <see cref="RegisterConsumer"/>.
+    /// Unlike <see cref="_consumers"/>, this set is never cleared — it survives
+    /// <see cref="Stop"/> so that <see cref="SeekConsumer"/> and <see cref="ResetConsumer"/>
+    /// can validate consumer names without requiring re-registration after each stop.
+    /// </summary>
+    private readonly HashSet<string> _registeredConsumerNames = new();
+
+    private readonly IRecordRouter _router;
 
     private const int ReaderPollIntervalMs = 10;
 
@@ -48,6 +59,7 @@ public sealed class Pipeline : IDisposable
     private Task _gcTask = Task.CompletedTask;
     private CancellationTokenSource? _flushTimerCts;
     private Task _flushTimerTask = Task.CompletedTask;
+    private long _recordsSinceLastFlush;
 
     /// <summary>
     /// Guards observable gauge callbacks and <see cref="_consumers"/>.Clear() in <see cref="Stop"/>
@@ -74,6 +86,7 @@ public sealed class Pipeline : IDisposable
         _config = config;
         _segmentsDir = Path.Combine(config.RootDirectory, "segments");
         _cursorsDir = Path.Combine(config.RootDirectory, "cursors");
+        _spillDir = Path.Combine(config.RootDirectory, "spill");
         Metrics = new PipelineMetrics(config.MeterName);
         _router = new BroadcastRouter(config.BackpressurePolicy, sinkName => Metrics.IncrementSinkDropped(sinkName));
     }
@@ -121,7 +134,9 @@ public sealed class Pipeline : IDisposable
         try
         {
             EnsureDirectories();
+            DeleteOrphanedSpillFiles();
             RecoverInternal();
+            _recordsSinceLastFlush = 0;
 
             foreach (ConsumerState cs in _consumers.Values)
             {
@@ -274,7 +289,7 @@ public sealed class Pipeline : IDisposable
             // writer — even if this throws (e.g. disk full), the old _writer is untouched.
             // SegmentWriter ctor uses FileMode.OpenOrCreate + seek-to-end, so a retry on
             // the same nextSegId after a prior failure is safe (R04-NLB).
-            SegmentWriter nextWriter = new SegmentWriter(_segmentsDir, nextSegId, _config.MaxSegmentSize);
+            SegmentWriter nextWriter = new SegmentWriter(_segmentsDir, nextSegId, _config.MaxSegmentSize, _config.CompressionAlgorithm);
 
             // Seal and dispose the old writer in a finally so _writer = nextWriter always
             // runs — preserving the invariant that _writer points to a valid open writer
@@ -294,15 +309,135 @@ public sealed class Pipeline : IDisposable
         }
 
         ulong seqNo = _nextSeqNo++;
+        _recordsSinceLastFlush++;
         _writer.Append(payload, seqNo, contentType, RecordFlags.None, schemaId);
 
         if (_config.DurabilityMode == DurabilityMode.Strict)
         {
+            long tsStart = Stopwatch.GetTimestamp();
             _writer.FlushToDisk();
+            double fsyncMs = Stopwatch.GetElapsedTime(tsStart).TotalMilliseconds;
+            Metrics.RecordFsyncDuration(fsyncMs);
+            Metrics.RecordBatchSize(_recordsSinceLastFlush);
+            _recordsSinceLastFlush = 0;
         }
 
         Metrics.IncrementRecordsAppended();
         Metrics.AddBytesAppended(payload.Length);
+        return seqNo;
+    }
+
+    /// <summary>
+    /// Appends multiple payloads as a single block record and returns the block's globally
+    /// monotonic sequence number. The block is stored as one framed record on disk with
+    /// <see cref="RecordFlags.IsBlock"/> set; push-mode consumers receive the entries as
+    /// individual <see cref="Consumer.LogRecord"/> instances (transparent to
+    /// <see cref="Sinks.ISink"/>). Pull-mode consumers receive the raw block record.
+    /// </summary>
+    /// <param name="entries">
+    /// Payloads to encode into the block. Must contain at least one entry.
+    /// All entries share the block frame's <paramref name="contentType"/> and
+    /// <paramref name="schemaId"/>.
+    /// </param>
+    /// <param name="contentType">Advisory payload encoding hint. Defaults to <see cref="ContentType.Unknown"/>.</param>
+    /// <param name="schemaId">Optional schema identifier. Defaults to 0 (none).</param>
+    /// <returns>The sequence number assigned to the block record.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="entries"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="entries"/> is empty, or the encoded block payload plus framing overhead
+    /// exceeds <see cref="PipelineConfiguration.MaxSegmentSize"/>.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">The pipeline is not in the <see cref="PipelineState.Running"/> state.</exception>
+    public ulong AppendBlock(
+        IReadOnlyList<ReadOnlyMemory<byte>> entries,
+        ContentType contentType = ContentType.Unknown,
+        uint schemaId = 0u)
+    {
+        ThrowIfNotRunning();
+        ArgumentNullException.ThrowIfNull(entries);
+        if (entries.Count == 0)
+        {
+            throw new ArgumentException("Block must contain at least one entry.", nameof(entries));
+        }
+
+        int blockPayloadSize = BlockPayloadWriter.ComputeSize(entries);
+        long recordSize = blockPayloadSize + RecordWriter.FramingOverhead;
+        if (recordSize > _config.MaxSegmentSize)
+        {
+            throw new ArgumentException(
+                $"Encoded block payload {blockPayloadSize} B plus framing overhead {RecordWriter.FramingOverhead} B " +
+                $"({recordSize} B total) exceeds MaxSegmentSize ({_config.MaxSegmentSize} B). " +
+                "The entire block must fit within one segment.",
+                nameof(entries));
+        }
+
+        if (_writer!.IsFull)
+        {
+            uint sealedSegId = _writer.SegmentId;
+            long sealedBytes = _writer.BytesWritten;
+            ulong sealedSeqNo = _nextSeqNo == 0 ? 0UL : _nextSeqNo - 1;
+            uint nextSegId = sealedSegId + 1;
+
+            if (nextSegId > SegmentNaming.MaxSegmentId)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot roll over to segment {nextSegId}: maximum segment ID is {SegmentNaming.MaxSegmentId}. " +
+                    "Archive or compact the log to reclaim segment IDs.");
+            }
+
+            SegmentWriter nextWriter = new SegmentWriter(_segmentsDir, nextSegId, _config.MaxSegmentSize, _config.CompressionAlgorithm);
+
+            try
+            {
+                _writer.Seal();
+            }
+            finally
+            {
+                _writer.Dispose();
+                _writer = nextWriter;
+            }
+
+            WriteCheckpointCore(sealedSegId, sealedBytes, sealedSeqNo, nextSegId);
+            Metrics.IncrementSegmentRollovers();
+        }
+
+        ulong seqNo = _nextSeqNo++;
+        _recordsSinceLastFlush++;
+
+        byte[] rented = ArrayPool<byte>.Shared.Rent(blockPayloadSize);
+        try
+        {
+            Span<byte> buf = rented.AsSpan(0, blockPayloadSize);
+            BlockPayloadWriter.Write(entries, buf);
+            _writer.Append(buf, seqNo, contentType, RecordFlags.IsBlock, schemaId);
+
+            if (_config.DurabilityMode == DurabilityMode.Strict)
+            {
+                long tsStart = Stopwatch.GetTimestamp();
+                _writer.FlushToDisk();
+                double fsyncMs = Stopwatch.GetElapsedTime(tsStart).TotalMilliseconds;
+                Metrics.RecordFsyncDuration(fsyncMs);
+                Metrics.RecordBatchSize(_recordsSinceLastFlush);
+                _recordsSinceLastFlush = 0;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        foreach (ReadOnlyMemory<byte> _ in entries)
+        {
+            Metrics.IncrementRecordsAppended();
+        }
+
+        long totalBytes = 0;
+        foreach (ReadOnlyMemory<byte> e in entries)
+        {
+            totalBytes += e.Length;
+        }
+
+        Metrics.AddBytesAppended(totalBytes);
         return seqNo;
     }
 
@@ -695,6 +830,7 @@ public sealed class Pipeline : IDisposable
             _config.CursorFlushInterval);
 
         _consumers[consumerName] = new ConsumerState(consumerName, flusher, 0u, 0L);
+        _registeredConsumerNames.Add(consumerName);
     }
 
     /// <summary>
@@ -746,10 +882,342 @@ public sealed class Pipeline : IDisposable
                 $"Sink '{sinkName}' is already registered for consumer '{consumerName}'.");
         }
 
-        var lane = new SinkLane(sinkName, _config.SinkLaneCapacity);
+        if (cs.Router is not null)
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' already uses a non-broadcast routing strategy. " +
+                "Use the same AddSink overload consistently.");
+        }
+
+        string spillPath = Path.Combine(_spillDir, $"{consumerName}-{sinkName}.spill");
+        var lane = new SinkLane(sinkName, _config.SinkLaneCapacity, spillPath);
         var slot = new SinkSlot(sinkName, sink, lane);
         cs.SinkSlots.Add(slot);
         cs.AddLane(lane);
+    }
+
+    /// <summary>
+    /// Registers a sink for the named consumer, routing only records whose
+    /// <see cref="RecordHeader.ContentType"/> matches <paramref name="contentTypeFilter"/>.
+    /// Records that do not match any registered content-type filter are dropped and the
+    /// pipeline's drop counter is incremented with sink name <c>"*"</c>.
+    /// </summary>
+    /// <remarks>
+    /// All <c>AddSink</c> calls for a given consumer must use the same overload
+    /// (broadcast, content-type, or hash). Mixing raises <see cref="InvalidOperationException"/>.
+    /// </remarks>
+    /// <param name="consumerName">The name passed to <see cref="RegisterConsumer"/>.</param>
+    /// <param name="sinkName">A name unique within this consumer.</param>
+    /// <param name="sink">The sink implementation to receive filtered records.</param>
+    /// <param name="contentTypeFilter">
+    /// The <see cref="ContentType"/> value a record must carry to be forwarded to this sink.
+    /// </param>
+    /// <exception cref="ObjectDisposedException">The pipeline has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The pipeline is not in the <see cref="PipelineState.Stopped"/> state,
+    /// no consumer with <paramref name="consumerName"/> is registered,
+    /// a sink named <paramref name="sinkName"/> is already registered for that consumer,
+    /// or the consumer already uses a different routing strategy.
+    /// </exception>
+    public void AddSink(string consumerName, string sinkName, ISink sink, ContentType contentTypeFilter)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(consumerName);
+        ArgumentException.ThrowIfNullOrEmpty(sinkName);
+        ArgumentNullException.ThrowIfNull(sink);
+
+        if (State != PipelineState.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"Sinks must be added before Start() (current state: {State}).");
+        }
+
+        if (!_consumers.TryGetValue(consumerName, out ConsumerState? cs))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' is not registered. Call RegisterConsumer first.");
+        }
+
+        if (cs.SinkSlots.Any(s => s.SinkName == sinkName))
+        {
+            throw new InvalidOperationException(
+                $"Sink '{sinkName}' is already registered for consumer '{consumerName}'.");
+        }
+
+        if (cs.Router is null && cs.SinkSlots.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' already uses a broadcast routing strategy. " +
+                "Use the same AddSink overload consistently.");
+        }
+
+        if (cs.Router is null)
+        {
+            cs.Router = new ContentTypeRouter(
+                _config.BackpressurePolicy,
+                sn => Metrics.IncrementSinkDropped(sn));
+        }
+        else if (cs.Router is not ContentTypeRouter)
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' already uses a different routing strategy. " +
+                "Use the same AddSink overload consistently.");
+        }
+
+        string spillPath = Path.Combine(_spillDir, $"{consumerName}-{sinkName}.spill");
+        var lane = new SinkLane(sinkName, _config.SinkLaneCapacity, spillPath);
+        var slot = new SinkSlot(sinkName, sink, lane);
+        cs.SinkSlots.Add(slot);
+        cs.AddLane(lane);
+        ((ContentTypeRouter)cs.Router).RegisterFilter(sinkName, contentTypeFilter);
+    }
+
+    /// <summary>
+    /// Registers a sink for the named consumer using hash-based routing. Records are
+    /// distributed across sinks by <c>abs(keySelector(record)) % sinkCount</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The <paramref name="keySelector"/> is captured from the first call for this consumer;
+    /// subsequent calls for the same consumer must use this overload but the
+    /// <paramref name="keySelector"/> parameter is ignored — the router retains the original selector.
+    /// </para>
+    /// <para>
+    /// All <c>AddSink</c> calls for a given consumer must use the same overload.
+    /// Mixing raises <see cref="InvalidOperationException"/>.
+    /// </para>
+    /// </remarks>
+    /// <param name="consumerName">The name passed to <see cref="RegisterConsumer"/>.</param>
+    /// <param name="sinkName">A name unique within this consumer.</param>
+    /// <param name="sink">The sink implementation to receive routed records.</param>
+    /// <param name="keySelector">
+    /// A function that extracts an integer routing key from a record. The key is reduced
+    /// modulo the number of registered sinks to select the target lane.
+    /// </param>
+    /// <exception cref="ObjectDisposedException">The pipeline has been disposed.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="keySelector"/> is <see langword="null"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The pipeline is not in the <see cref="PipelineState.Stopped"/> state,
+    /// no consumer with <paramref name="consumerName"/> is registered,
+    /// a sink named <paramref name="sinkName"/> is already registered for that consumer,
+    /// or the consumer already uses a different routing strategy.
+    /// </exception>
+    public void AddSink(string consumerName, string sinkName, ISink sink, Func<LogRecord, int> keySelector)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(consumerName);
+        ArgumentException.ThrowIfNullOrEmpty(sinkName);
+        ArgumentNullException.ThrowIfNull(sink);
+        ArgumentNullException.ThrowIfNull(keySelector);
+
+        if (State != PipelineState.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"Sinks must be added before Start() (current state: {State}).");
+        }
+
+        if (!_consumers.TryGetValue(consumerName, out ConsumerState? cs))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' is not registered. Call RegisterConsumer first.");
+        }
+
+        if (cs.SinkSlots.Any(s => s.SinkName == sinkName))
+        {
+            throw new InvalidOperationException(
+                $"Sink '{sinkName}' is already registered for consumer '{consumerName}'.");
+        }
+
+        if (cs.Router is null && cs.SinkSlots.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' already uses a broadcast routing strategy. " +
+                "Use the same AddSink overload consistently.");
+        }
+
+        if (cs.Router is null)
+        {
+            cs.Router = new HashRouter(
+                keySelector,
+                _config.BackpressurePolicy,
+                sn => Metrics.IncrementSinkDropped(sn));
+        }
+        else if (cs.Router is not HashRouter)
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' already uses a different routing strategy. " +
+                "Use the same AddSink overload consistently.");
+        }
+
+        string spillPath = Path.Combine(_spillDir, $"{consumerName}-{sinkName}.spill");
+        var lane = new SinkLane(sinkName, _config.SinkLaneCapacity, spillPath);
+        var slot = new SinkSlot(sinkName, sink, lane);
+        cs.SinkSlots.Add(slot);
+        cs.AddLane(lane);
+    }
+
+    /// <summary>
+    /// Moves the named consumer's cursor to the first record with
+    /// <see cref="RecordHeader.SeqNo"/> &gt;= <paramref name="seqNo"/>.
+    /// The cursor is persisted to disk immediately.
+    /// </summary>
+    /// <remarks>
+    /// The pipeline must be in the <see cref="PipelineState.Stopped"/> state.
+    /// Call <see cref="Stop"/> or <see cref="ForceStop"/> before seeking.
+    /// On the next <see cref="Start"/>, the consumer will resume from the seeked position.
+    /// </remarks>
+    /// <param name="consumerName">The name passed to <see cref="RegisterConsumer"/>.</param>
+    /// <param name="seqNo">Target sequence number (inclusive lower bound).</param>
+    /// <exception cref="ObjectDisposedException">The pipeline has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The pipeline is not in the <see cref="PipelineState.Stopped"/> state,
+    /// or <paramref name="consumerName"/> is not registered.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="seqNo"/> is beyond the log tail, or the log is empty.
+    /// </exception>
+    /// <exception cref="PeclSeekException">
+    /// <paramref name="seqNo"/> falls within a segment that has been deleted by retention GC.
+    /// <see cref="PeclSeekException.EarliestAvailableSeqNo"/> contains the floor value.
+    /// </exception>
+    public void SeekConsumer(string consumerName, ulong seqNo)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(consumerName);
+
+        if (State != PipelineState.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"SeekConsumer is only valid when the pipeline is Stopped (current state: {State}).");
+        }
+
+        if (!_registeredConsumerNames.Contains(consumerName))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' is not registered.");
+        }
+
+        List<uint> segIds = EnumerateSegmentIds();
+
+        if (segIds.Count == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(seqNo), "The log is empty; no records to seek to.");
+        }
+
+        // Guard: seqNo must not exceed the last record in the log.
+        ulong tailSeqNo = ReadLastSeqNoFromSegment(segIds[segIds.Count - 1]);
+        if (seqNo > tailSeqNo)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(seqNo),
+                seqNo,
+                $"SeqNo {seqNo} is beyond the log tail (last written seqNo: {tailSeqNo}).");
+        }
+
+        // Find the segment whose first record has the largest SeqNo <= seqNo.
+        // That segment contains the first record with SeqNo >= seqNo.
+        uint? targetSegId = null;
+        foreach (uint segId in segIds)
+        {
+            ulong firstSeqNo = ReadFirstSeqNoFromSegment(segId);
+            if (firstSeqNo <= seqNo)
+            {
+                targetSegId = segId;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        if (targetSegId is null)
+        {
+            // seqNo is below the first record of the oldest remaining segment.
+            ulong earliestSeqNo = ReadFirstSeqNoFromSegment(segIds[0]);
+            throw new PeclSeekException(
+                earliestSeqNo,
+                $"SeqNo {seqNo} is below the retention floor; earliest available SeqNo is {earliestSeqNo}.");
+        }
+
+        long offset = ScanSegmentForSeqNo(targetSegId.Value, seqNo);
+        // cursor.LastReadSeqNo is set to the requested seqNo, not the actual seqNo at the
+        // byte offset (which may be >= seqNo if no exact match exists). Lag metrics will be
+        // slightly inaccurate until the first ReadNext call updates the cursor to the real seqNo.
+        var cursor = new CursorData(consumerName, targetSegId.Value, offset, seqNo);
+        CursorWriter.Write(_cursorsDir, cursor);
+
+        // Update in-memory state if the consumer is still live in _consumers
+        // (populated when the pipeline is Running; cleared by Stop/ExecuteCleanupSequence).
+        // RecoverInternal always re-reads from disk on the next Start(), so this is a
+        // best-effort sync — correctness is guaranteed by the disk write above.
+        if (_consumers.TryGetValue(consumerName, out ConsumerState? cs))
+        {
+            cs.CurrentSegmentId = targetSegId.Value;
+            cs.CurrentOffset = offset;
+        }
+    }
+
+    /// <summary>
+    /// Resets the named consumer's cursor to the earliest available record in the log.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The pipeline must be in the <see cref="PipelineState.Stopped"/> state.
+    /// When the log is empty, a zeroed cursor is written and the consumer will start
+    /// from the beginning on the next <see cref="Start"/>.
+    /// </para>
+    /// <para>
+    /// When old segments have been deleted by retention GC, this method moves the cursor
+    /// to the first record of the oldest remaining segment (not necessarily SeqNo 0).
+    /// </para>
+    /// </remarks>
+    /// <param name="consumerName">The name passed to <see cref="RegisterConsumer"/>.</param>
+    /// <exception cref="ObjectDisposedException">The pipeline has been disposed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The pipeline is not in the <see cref="PipelineState.Stopped"/> state,
+    /// or <paramref name="consumerName"/> is not registered.
+    /// </exception>
+    public void ResetConsumer(string consumerName)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(consumerName);
+
+        if (State != PipelineState.Stopped)
+        {
+            throw new InvalidOperationException(
+                $"ResetConsumer is only valid when the pipeline is Stopped (current state: {State}).");
+        }
+
+        if (!_registeredConsumerNames.Contains(consumerName))
+        {
+            throw new InvalidOperationException(
+                $"Consumer '{consumerName}' is not registered.");
+        }
+
+        List<uint> segIds = EnumerateSegmentIds();
+
+        if (segIds.Count == 0)
+        {
+            // Empty log — write a zeroed cursor; Start() will begin from the first record.
+            CursorWriter.Write(_cursorsDir, new CursorData(consumerName, 0u, 0L, 0UL));
+            if (_consumers.TryGetValue(consumerName, out ConsumerState? emptyCs))
+            {
+                emptyCs.CurrentSegmentId = 0u;
+                emptyCs.CurrentOffset = 0L;
+            }
+
+            return;
+        }
+
+        // Point to the very start of the oldest available segment.
+        uint firstSegId = segIds[0];
+        ulong firstSeqNo = ReadFirstSeqNoFromSegment(firstSegId);
+        CursorWriter.Write(_cursorsDir, new CursorData(consumerName, firstSegId, 0L, firstSeqNo));
+        if (_consumers.TryGetValue(consumerName, out ConsumerState? resetCs))
+        {
+            resetCs.CurrentSegmentId = firstSegId;
+            resetCs.CurrentOffset = 0L;
+        }
     }
 
     /// <summary>
@@ -789,6 +1257,7 @@ public sealed class Pipeline : IDisposable
         {
             cs.Flusher.Advance(cs.CurrentSegmentId, cs.CurrentOffset, result.Value.Header.SeqNo);
             cs.LastReadSeqNo = result.Value.Header.SeqNo;
+            Metrics.IncrementConsumerReadRate();
         }
 
         return result;
@@ -923,10 +1392,39 @@ public sealed class Pipeline : IDisposable
     {
         Directory.CreateDirectory(_segmentsDir);
         Directory.CreateDirectory(_cursorsDir);
+        Directory.CreateDirectory(_spillDir);
+    }
+
+    /// <summary>
+    /// Deletes spill files in <c>{root}/spill/</c> that have no matching registered consumer+sink.
+    /// Called at the end of <see cref="Start"/> setup so orphaned files from deregistered
+    /// sinks do not accumulate on disk indefinitely.
+    /// </summary>
+    private void DeleteOrphanedSpillFiles()
+    {
+        // Build the set of valid {consumer}-{sink}.spill file names from registered consumers.
+        var validNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ConsumerState cs in _consumers.Values)
+        {
+            foreach (SinkSlot slot in cs.SinkSlots)
+            {
+                validNames.Add($"{cs.ConsumerName}-{slot.SinkName}.spill");
+            }
+        }
+
+        foreach (string filePath in Directory.EnumerateFiles(_spillDir, "*.spill"))
+        {
+            string fileName = Path.GetFileName(filePath);
+            if (!validNames.Contains(fileName))
+            {
+                File.Delete(filePath);
+            }
+        }
     }
 
     private void RecoverInternal()
     {
+        long recoveryStart = Stopwatch.GetTimestamp();
         uint lastSegId = 0u;
         long lastOffset = 0L;
         ulong lastSeqNo = 0UL;
@@ -1012,6 +1510,8 @@ public sealed class Pipeline : IDisposable
 
         Metrics.SetRecoveryTruncatedBytes(recoveryTruncatedBytes);
         Metrics.IncrementRecoveryCount();
+        Metrics.SetRecoveryDurationMs((long)Stopwatch.GetElapsedTime(recoveryStart).TotalMilliseconds);
+        Metrics.SetSegmentBytes(ComputeSegmentBytes(segIds));
 
         // Determine the starting sequence number for new appends.
         // If the scan found records, use the scanned seqno. If not but a valid
@@ -1027,11 +1527,11 @@ public sealed class Pipeline : IDisposable
         // Open the segment writer, resuming at the tail position.
         if (segIds.Count == 0)
         {
-            _writer = new SegmentWriter(_segmentsDir, 0u, _config.MaxSegmentSize);
+            _writer = new SegmentWriter(_segmentsDir, 0u, _config.MaxSegmentSize, _config.CompressionAlgorithm);
         }
         else
         {
-            _writer = new SegmentWriter(_segmentsDir, lastSegId, _config.MaxSegmentSize);
+            _writer = new SegmentWriter(_segmentsDir, lastSegId, _config.MaxSegmentSize, _config.CompressionAlgorithm);
             // SegmentWriter seeks to end on open, which is correct whether truncated or not.
         }
 
@@ -1058,7 +1558,14 @@ public sealed class Pipeline : IDisposable
                     cs.CurrentOffset = cur.Offset;
                 }
             }
-            else
+            else if (_config.MissingCursorPolicy == MissingCursorPolicy.FromTail)
+            {
+                // Position at the tail so the consumer only sees records appended after this Start().
+                // On an empty log lastSegId and lastOffset are both 0 — same as FromBeginning.
+                cs.CurrentSegmentId = lastSegId;
+                cs.CurrentOffset = lastOffset;
+            }
+            else // MissingCursorPolicy.FromBeginning (default)
             {
                 cs.CurrentSegmentId = 0u;
                 cs.CurrentOffset = 0L;
@@ -1106,7 +1613,11 @@ public sealed class Pipeline : IDisposable
 
     private void FlushInternal()
     {
+        // Measure only the actual disk-sync portion.
+        long tsStart = Stopwatch.GetTimestamp();
         _writer!.FlushToDisk();
+        double fsyncMs = Stopwatch.GetElapsedTime(tsStart).TotalMilliseconds;
+
         WriteCheckpoint();
 
         foreach (ConsumerState cs in _consumers.Values)
@@ -1114,6 +1625,9 @@ public sealed class Pipeline : IDisposable
             cs.Flusher.Flush();
         }
 
+        Metrics.RecordFsyncDuration(fsyncMs);
+        Metrics.RecordBatchSize(_recordsSinceLastFlush);
+        _recordsSinceLastFlush = 0;
         Metrics.IncrementFlushCount();
     }
 
@@ -1158,6 +1672,121 @@ public sealed class Pipeline : IDisposable
         return ids;
     }
 
+    /// <summary>
+    /// Opens <paramref name="segId"/> read-only and returns the <c>SeqNo</c> of its first record.
+    /// </summary>
+    /// <exception cref="InvalidDataException">
+    /// The segment is unreadable or contains no valid records.
+    /// </exception>
+    private ulong ReadFirstSeqNoFromSegment(uint segId)
+    {
+        string path = SegmentNaming.GetFilePath(_segmentsDir, segId);
+        using FileStream stream = File.OpenRead(path);
+        Result<RecordReadResult, PeclError> result = RecordReader.Read(stream);
+        if (result.IsSuccess)
+        {
+            return result.Value.Header.SeqNo;
+        }
+
+        throw new InvalidDataException(
+            $"Segment {segId} at '{path}' is unreadable: {result.Error}");
+    }
+
+    /// <summary>
+    /// Opens <paramref name="segId"/> read-only and returns the <c>SeqNo</c> of its last valid record.
+    /// Returns <c>0</c> if the segment contains no valid records.
+    /// </summary>
+    private ulong ReadLastSeqNoFromSegment(uint segId)
+    {
+        string path = SegmentNaming.GetFilePath(_segmentsDir, segId);
+        using FileStream stream = File.OpenRead(path);
+        // Note: 0UL is returned both for "last valid record is seqNo 0" and "segment has
+        // no valid records". Callers using this for a tail guard should be aware that an
+        // empty/corrupt segment is indistinguishable from a real seqNo-0 record.
+        ulong lastSeqNo = 0UL;
+        while (true)
+        {
+            Result<RecordReadResult, PeclError> result = RecordReader.Read(stream);
+            if (result.IsFailure)
+            {
+                break;
+            }
+
+            lastSeqNo = result.Value.Header.SeqNo;
+        }
+
+        return lastSeqNo;
+    }
+
+    /// <summary>
+    /// Scans <paramref name="segId"/> and returns the byte offset of the first record
+    /// whose <c>SeqNo</c> is &gt;= <paramref name="targetSeqNo"/>.
+    /// Returns the end-of-stream position if no such record exists.
+    /// </summary>
+    private long ScanSegmentForSeqNo(uint segId, ulong targetSeqNo)
+    {
+        string path = SegmentNaming.GetFilePath(_segmentsDir, segId);
+        using FileStream stream = File.OpenRead(path);
+        while (true)
+        {
+            long offset = stream.Position;
+            Result<RecordReadResult, PeclError> result = RecordReader.Read(stream);
+            if (result.IsFailure)
+            {
+                return offset;
+            }
+
+            if (result.Value.Header.SeqNo >= targetSeqNo)
+            {
+                return offset;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Routes a single read result to all sink lanes, expanding block records into
+    /// individual entries transparently before routing.
+    /// </summary>
+    private async ValueTask RouteRecordAsync(RecordReadResult readResult, ConsumerState cs, uint segmentIdBeforeRead)
+    {
+        if (readResult.Header.Flags.HasFlag(RecordFlags.IsBlock))
+        {
+            // Decode all entries synchronously first (ref struct cannot cross await boundary),
+            // then route each materialised entry record.
+            var reader = new BlockPayloadReader(readResult.Payload.Span);
+            var entries = new List<LogRecord>(reader.EntryCount);
+            while (reader.TryReadNext(out ReadOnlySpan<byte> entryPayload))
+            {
+                RecordHeader entryHeader = readResult.Header with
+                {
+                    Flags = RecordFlags.None,
+                    PayloadLength = (uint)entryPayload.Length,
+                };
+                entries.Add(new LogRecord(entryHeader, entryPayload.ToArray()));
+            }
+
+            foreach (LogRecord entryRecord in entries)
+            {
+                await (cs.Router ?? _router).RouteAsync(entryRecord, cs.Lanes, CancellationToken.None);
+                cs.LastRoutedSeqNo = entryRecord.Header.SeqNo;
+            }
+        }
+        else
+        {
+            LogRecord record = new(readResult.Header, readResult.Payload.ToArray());
+            await (cs.Router ?? _router).RouteAsync(record, cs.Lanes, CancellationToken.None);
+            cs.LastRoutedSeqNo = record.Header.SeqNo;
+        }
+
+        cs.LastFullyRoutedSegmentId = segmentIdBeforeRead;
+
+        // Drain spill inline after each routed record for faster replay when records flow actively.
+        foreach (SinkLane lane in cs.Lanes)
+        {
+            while (lane.HasSpill && lane.TryDrainOneSpillRecord()) { }
+        }
+    }
+
     private async Task RunReaderLoopAsync(ConsumerState cs, CancellationToken ct)
     {
         // Normal polling loop — exits when ct is cancelled.
@@ -1178,6 +1807,13 @@ public sealed class Pipeline : IDisposable
                 {
                     break;
                 }
+
+                // Opportunistic spill drain during idle time.
+                foreach (SinkLane lane in cs.Lanes)
+                {
+                    while (lane.HasSpill && lane.TryDrainOneSpillRecord()) { }
+                }
+
                 continue;
             }
 
@@ -1191,13 +1827,7 @@ public sealed class Pipeline : IDisposable
             }
 
             RecordReadResult readResult = result.Value;
-            LogRecord record = new(readResult.Header, readResult.Payload.ToArray());
-
-            await _router.RouteAsync(record, cs.Lanes, CancellationToken.None);
-
-            // After routing completes the segment we read from is safe for the GC to collect.
-            cs.LastFullyRoutedSegmentId = segmentIdBeforeRead;
-            cs.LastRoutedSeqNo = record.Header.SeqNo;
+            await RouteRecordAsync(readResult, cs, segmentIdBeforeRead);
         }
 
         // Drain phase: Stop() calls FlushInternal() before cancelling ct, so all
@@ -1217,20 +1847,18 @@ public sealed class Pipeline : IDisposable
                 break;
             }
 
+            uint segmentIdBeforeRead = cs.CurrentSegmentId;
             RecordReadResult readResult = result.Value;
-            LogRecord record = new(readResult.Header, readResult.Payload.ToArray());
 
             try
             {
-                await _router.RouteAsync(record, cs.Lanes, CancellationToken.None);
+                await RouteRecordAsync(readResult, cs, segmentIdBeforeRead);
             }
             catch
             {
                 // Sink already faulted — its error is captured by Task.WaitAll in Stop().
                 break;
             }
-
-            cs.LastRoutedSeqNo = record.Header.SeqNo;
         }
     }
 
@@ -1277,29 +1905,32 @@ public sealed class Pipeline : IDisposable
                     // Acquire _observabilityLock to guard _consumers reads against concurrent
                     // Clear() in Stop() on the GC-task-timeout path (R05-L8). Only the
                     // dictionary read is inside the lock; I/O runs outside.
-                    uint watermark;
+                    bool noConsumers;
+                    uint watermark = 0u;
                     lock (_observabilityLock)
                     {
-                        if (_consumers.Count == 0)
+                        noConsumers = _consumers.Count == 0;
+                        if (!noConsumers)
                         {
-                            return; // preserve existing early-return (before SetSegmentCount)
+                            // Pull-mode consumers advance CurrentSegmentId synchronously on the main
+                            // thread — no routing race. Push-mode consumers use
+                            // LastFullyRoutedSegmentId (updated post-RouteAsync).
+                            watermark = _consumers.Values.Min(cs =>
+                                cs.IsPushMode ? cs.LastFullyRoutedSegmentId : cs.CurrentSegmentId);
                         }
-
-                        // Pull-mode consumers advance CurrentSegmentId synchronously on the main
-                        // thread — no routing race. Push-mode consumers use
-                        // LastFullyRoutedSegmentId (updated post-RouteAsync).
-                        watermark = _consumers.Values.Min(cs =>
-                            cs.IsPushMode ? cs.LastFullyRoutedSegmentId : cs.CurrentSegmentId);
                     }
 
-                    foreach (uint segId in segIds)
+                    if (!noConsumers)
                     {
-                        if (segId >= watermark || segId >= activeSegmentId)
+                        foreach (uint segId in segIds)
                         {
-                            continue;
-                        }
+                            if (segId >= watermark || segId >= activeSegmentId)
+                            {
+                                continue;
+                            }
 
-                        TryDeleteSegment(segId, ref segmentCount);
+                            TryDeleteSegment(segId, ref segmentCount);
+                        }
                     }
 
                     break;
@@ -1377,6 +2008,7 @@ public sealed class Pipeline : IDisposable
         }
 
         Metrics.SetSegmentCount(segmentCount);
+        Metrics.SetSegmentBytes(ComputeSegmentBytes(EnumerateSegmentIds())); // post-deletion count
     }
 
     private void TryDeleteSegment(uint segId, ref long segmentCount)
@@ -1396,6 +2028,28 @@ public sealed class Pipeline : IDisposable
         {
             // Non-fatal: same as IOException.
         }
+    }
+
+    /// <summary>
+    /// Sums the on-disk sizes of all segment files identified by <paramref name="segIds"/>.
+    /// Files that have been deleted concurrently are silently skipped.
+    /// </summary>
+    private long ComputeSegmentBytes(IReadOnlyList<uint> segIds)
+    {
+        long total = 0;
+        foreach (uint id in segIds)
+        {
+            try
+            {
+                total += new FileInfo(SegmentNaming.GetFilePath(_segmentsDir, id)).Length;
+            }
+            catch (FileNotFoundException)
+            {
+                // Concurrently deleted — exclude from total.
+            }
+        }
+
+        return total;
     }
 
     private void ThrowIfNotRunning()
@@ -1474,12 +2128,19 @@ public sealed class Pipeline : IDisposable
         /// <summary>Byte offset within <see cref="CurrentSegmentId"/> from which the next read will start.</summary>
         public long CurrentOffset { get; set; }
 
-        /// <summary>Sink slots registered via <see cref="Pipeline.AddSink"/>.</summary>
+        /// <summary>Sink slots registered via <c>AddSink</c>.</summary>
         public List<SinkSlot> SinkSlots { get; } = new();
 
         /// <summary>
-        /// Read-only view of the sink lanes, passed to <see cref="BroadcastRouter.RouteAsync"/>.
-        /// Kept in sync with <see cref="SinkSlots"/> by <see cref="Pipeline.AddSink"/>.
+        /// The routing strategy for this consumer. <see langword="null"/> means broadcast
+        /// (the pipeline-level <c>_router</c> is used). Set by the content-type and
+        /// hash-routing <c>AddSink</c> overloads.
+        /// </summary>
+        public IRecordRouter? Router { get; set; }
+
+        /// <summary>
+        /// Read-only view of the sink lanes, passed to the router's <c>RouteAsync</c>.
+        /// Kept in sync with <see cref="SinkSlots"/> by <c>AddSink</c>.
         /// </summary>
         public IReadOnlyList<SinkLane> Lanes => _lanes;
 

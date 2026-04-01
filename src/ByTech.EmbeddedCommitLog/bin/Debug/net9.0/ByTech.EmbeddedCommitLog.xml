@@ -209,6 +209,9 @@
             <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.WriteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Threading.CancellationToken)"/> — a full lane blocks the router until space is available.
             Under <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Drop"/>, <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.TryWrite(ByTech.EmbeddedCommitLog.Consumer.LogRecord)"/> is used —
             the record is discarded immediately if the lane is full and <paramref name="onDropped"/> is invoked.
+            Under <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Spill"/>, overflow records are written to the lane's spill
+            file; once a spill file exists all records go to spill (not directly to the channel) to
+            preserve FIFO order.
             Parallel fan-out is a Phase 3 optimisation.
             </remarks>
             <param name="policy">Backpressure policy to apply when a lane is at capacity.</param>
@@ -226,6 +229,9 @@
             <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.WriteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Threading.CancellationToken)"/> — a full lane blocks the router until space is available.
             Under <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Drop"/>, <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.TryWrite(ByTech.EmbeddedCommitLog.Consumer.LogRecord)"/> is used —
             the record is discarded immediately if the lane is full and <paramref name="onDropped"/> is invoked.
+            Under <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Spill"/>, overflow records are written to the lane's spill
+            file; once a spill file exists all records go to spill (not directly to the channel) to
+            preserve FIFO order.
             Parallel fan-out is a Phase 3 optimisation.
             </remarks>
             <param name="policy">Backpressure policy to apply when a lane is at capacity.</param>
@@ -235,6 +241,92 @@
             </param>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Consumer.BroadcastRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter">
+            <summary>
+            Routes records to sink lanes whose registered <see cref="T:ByTech.EmbeddedCommitLog.Records.ContentType"/> filter matches
+            the record's <see cref="P:ByTech.EmbeddedCommitLog.Records.RecordHeader.ContentType"/>. Records that do not match any
+            registered lane filter are dropped and the <paramref name="onDropped"/> callback is
+            invoked with sink name <c>"*"</c>.
+            </summary>
+            <remarks>
+            <para>
+            Use <see cref="M:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter.RegisterFilter(System.String,ByTech.EmbeddedCommitLog.Records.ContentType)"/> (called by
+            <c>Pipeline.AddSink(consumerName, sinkName, sink, ContentType)</c>) to associate each
+            lane with its content-type filter before the pipeline starts.
+            </para>
+            <para>
+            Lanes registered without an explicit filter (i.e. whose name is not in the filter map)
+            receive every record regardless of content type.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter.#ctor(ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy,System.Action{System.String})">
+            <summary>
+            Routes records to sink lanes whose registered <see cref="T:ByTech.EmbeddedCommitLog.Records.ContentType"/> filter matches
+            the record's <see cref="P:ByTech.EmbeddedCommitLog.Records.RecordHeader.ContentType"/>. Records that do not match any
+            registered lane filter are dropped and the <paramref name="onDropped"/> callback is
+            invoked with sink name <c>"*"</c>.
+            </summary>
+            <remarks>
+            <para>
+            Use <see cref="M:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter.RegisterFilter(System.String,ByTech.EmbeddedCommitLog.Records.ContentType)"/> (called by
+            <c>Pipeline.AddSink(consumerName, sinkName, sink, ContentType)</c>) to associate each
+            lane with its content-type filter before the pipeline starts.
+            </para>
+            <para>
+            Lanes registered without an explicit filter (i.e. whose name is not in the filter map)
+            receive every record regardless of content type.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter.RegisterFilter(System.String,ByTech.EmbeddedCommitLog.Records.ContentType)">
+            <summary>
+            Associates <paramref name="sinkName"/> with <paramref name="contentType"/> so that
+            only records carrying that content type are forwarded to the corresponding lane.
+            </summary>
+            <param name="sinkName">The unique name of the sink lane to filter.</param>
+            <param name="contentType">The content type that records must carry to be routed to this lane.</param>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.ContentTypeRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)">
+            <inheritdoc/>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Consumer.HashRouter">
+            <summary>
+            Distributes records across sink lanes by computing
+            <c>((keySelector(record) % lanes.Count) + lanes.Count) % lanes.Count</c>
+            and writing to the selected lane only. This provides stable, deterministic
+            partitioning for a fixed set of lanes (lanes are frozen at pipeline start).
+            </summary>
+            <remarks>
+            <para>
+            The double-modulo formula ensures a non-negative index even when
+            <paramref name="keySelector"/> returns a negative value.
+            </para>
+            <para>
+            If the lane list is empty, <see cref="M:ByTech.EmbeddedCommitLog.Consumer.HashRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)"/> is a no-op.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.HashRouter.#ctor(System.Func{ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Int32},ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy,System.Action{System.String})">
+            <summary>
+            Distributes records across sink lanes by computing
+            <c>((keySelector(record) % lanes.Count) + lanes.Count) % lanes.Count</c>
+            and writing to the selected lane only. This provides stable, deterministic
+            partitioning for a fixed set of lanes (lanes are frozen at pipeline start).
+            </summary>
+            <remarks>
+            <para>
+            The double-modulo formula ensures a non-negative index even when
+            <paramref name="keySelector"/> returns a negative value.
+            </para>
+            <para>
+            If the lane list is empty, <see cref="M:ByTech.EmbeddedCommitLog.Consumer.HashRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)"/> is a no-op.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.HashRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)">
             <inheritdoc/>
         </member>
         <member name="T:ByTech.EmbeddedCommitLog.Consumer.IRecordRouter">
@@ -296,8 +388,14 @@
             </summary>
             <remarks>
             <para>
-            Uses the Block backpressure policy: <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.WriteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Threading.CancellationToken)"/> awaits when the lane is at
-            capacity, suspending the caller until the sink task drains at least one record.
+            Block policy: <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.WriteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Threading.CancellationToken)"/> awaits when the lane is at capacity, suspending
+            the caller until the sink task drains at least one record.
+            </para>
+            <para>
+            Spill policy: when the lane is full, overflow records are written to a local
+            <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SpillFile"/> at the path supplied to the constructor. The reader loop
+            replays spill records back into the channel via <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.TryDrainOneSpillRecord"/>
+            during idle time and after each routed record.
             </para>
             <para>
             <see cref="P:ByTech.EmbeddedCommitLog.Consumer.SinkLane.Count"/> is an approximate value under concurrent access. It is suitable for
@@ -317,12 +415,19 @@
         <member name="P:ByTech.EmbeddedCommitLog.Consumer.SinkLane.Reader">
             <summary>The reader side of the lane, consumed by the sink task.</summary>
         </member>
-        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.#ctor(System.String,System.Int32)">
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.#ctor(System.String,System.Int32,System.String)">
             <summary>
             Creates a new <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SinkLane"/> with the given name and bounded capacity.
             </summary>
             <param name="sinkName">Name of the sink this lane serves. Must not be null.</param>
             <param name="capacity">Maximum records that may be buffered. Must be at least 1.</param>
+            <param name="spillFilePath">
+            Absolute path for the spill file used by <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Spill"/>.
+            If a file already exists at this path on construction (crash recovery), a
+            <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SpillFile"/> is opened immediately so replay begins on the first
+            <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.TryDrainOneSpillRecord"/> call. Pass <see langword="null"/> when
+            spill is not in use.
+            </param>
             <exception cref="T:System.ArgumentNullException"><paramref name="sinkName"/> is null.</exception>
             <exception cref="T:System.ArgumentOutOfRangeException"><paramref name="capacity"/> is less than 1.</exception>
         </member>
@@ -347,6 +452,41 @@
             </returns>
             <exception cref="T:System.ObjectDisposedException">The lane has been disposed.</exception>
         </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Consumer.SinkLane.HasSpill">
+            <summary>
+            <see langword="true"/> when a spill file is active for this lane (either because
+            the lane overflowed or because a crash-recovery file was found at startup).
+            Once <see langword="true"/>, all routed records go to spill (never directly to
+            the channel) to preserve FIFO order.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.Spill(ByTech.EmbeddedCommitLog.Consumer.LogRecord)">
+            <summary>
+            Writes <paramref name="record"/> to the spill file.
+            Creates the file on the first overflow. All subsequent records for this lane
+            must also go to spill (even if the channel has space) to preserve FIFO order.
+            </summary>
+            <param name="record">The record to spill.</param>
+            <exception cref="T:System.InvalidOperationException">
+            No spill file path was supplied to the constructor.
+            </exception>
+            <exception cref="T:System.IO.IOException">The spill file write failed.</exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.TryDrainOneSpillRecord">
+            <summary>
+            Attempts to replay one record from the spill file into the channel.
+            </summary>
+            <returns>
+            <see langword="true"/> if a record was successfully moved from spill to the channel.
+            <see langword="false"/> if the channel is currently full (try again later),
+            the spill file is empty, or spill replay is complete (spill file deleted).
+            </returns>
+            <remarks>
+            Must only be called from the reader loop task (the sole channel writer).
+            If the channel is full after a record was read from the file, the read position
+            is rewound so the record is retried on the next call.
+            </remarks>
+        </member>
         <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.Complete(System.Exception)">
             <summary>
             Signals that no more records will be written to this lane.
@@ -355,6 +495,97 @@
             <param name="error">Optional fault to surface to the reader; null for a clean completion.</param>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Consumer.SinkLane.Dispose">
+            <inheritdoc/>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Consumer.SpillFile">
+            <summary>
+            Append-only overflow store for a single <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SinkLane"/>. Records written here
+            are replayed back into the lane's channel when space becomes available.
+            </summary>
+            <remarks>
+            <para>
+            The spill file uses PECL record framing (<see cref="M:ByTech.EmbeddedCommitLog.Records.RecordWriter.Write(System.IO.Stream,System.ReadOnlySpan{System.Byte},System.UInt64,ByTech.EmbeddedCommitLog.Records.ContentType,ByTech.EmbeddedCommitLog.Records.RecordFlags,System.UInt32,ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm)"/>) so that
+            crash-truncated tails are detected via CRC validation during replay.
+            </para>
+            <para>
+            Compression flags are stripped on write: <see cref="P:ByTech.EmbeddedCommitLog.Consumer.LogRecord.Payload"/> is always
+            the decoded (decompressed) payload, so the spill file stores uncompressed records.
+            </para>
+            <para>
+            Two <see cref="T:System.IO.FileStream"/> handles are kept open simultaneously: an append-only
+            write handle and a sequential read handle. Only the reader loop task calls
+            <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.Append(ByTech.EmbeddedCommitLog.Consumer.LogRecord)"/> and <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.TryReadNext(ByTech.EmbeddedCommitLog.Consumer.LogRecord@)"/>, so no synchronisation is needed.
+            </para>
+            </remarks>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Consumer.SpillFile.CompressionFlags">
+            <summary>All flag bits related to compression; stripped when appending to spill.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.#ctor(System.String)">
+            <summary>
+            Opens (or creates) the spill file at <paramref name="path"/> for append and replay.
+            If the file already exists (crash recovery), the read stream starts at offset 0 so
+            all previously-written records are replayed on the first <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.TryReadNext(ByTech.EmbeddedCommitLog.Consumer.LogRecord@)"/> call.
+            </summary>
+            <param name="path">Absolute path to the spill file.</param>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.Create(System.String)">
+            <summary>
+            Creates the parent directory (idempotent) then returns a new <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SpillFile"/>
+            at <paramref name="path"/>. If a file already exists it is opened for
+            crash-recovery replay rather than truncated.
+            </summary>
+            <param name="path">Absolute path to the spill file.</param>
+            <returns>A new <see cref="T:ByTech.EmbeddedCommitLog.Consumer.SpillFile"/> instance.</returns>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.Append(ByTech.EmbeddedCommitLog.Consumer.LogRecord)">
+            <summary>
+            Appends <paramref name="record"/> to the spill file using PECL record framing.
+            Compression flags are stripped; the payload is stored verbatim
+            (<see cref="P:ByTech.EmbeddedCommitLog.Consumer.LogRecord.Payload"/> is always the decoded payload).
+            </summary>
+            <param name="record">The record to spill.</param>
+            <exception cref="T:System.IO.IOException">The write or flush failed.</exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.TryReadNext(ByTech.EmbeddedCommitLog.Consumer.LogRecord@)">
+            <summary>
+            Attempts to read the next record from the spill file.
+            Returns <see langword="false"/> at EOF or on any framing / CRC error
+            (corrupt tail — replay stops and the remaining bytes are abandoned).
+            </summary>
+            <param name="record">
+            The reconstructed <see cref="T:ByTech.EmbeddedCommitLog.Consumer.LogRecord"/> on success; <see langword="null"/> otherwise.
+            </param>
+            <returns>
+            <see langword="true"/> if a complete, valid record was read;
+            <see langword="false"/> at EOF or on corruption.
+            </returns>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Consumer.SpillFile.IsFullyReplayed">
+            <summary>
+            <see langword="true"/> when all written records have been read back.
+            Compares the read-stream position against the write-stream position
+            (the current end-of-file offset after the last <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.Append(ByTech.EmbeddedCommitLog.Consumer.LogRecord)"/> call).
+            </summary>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Consumer.SpillFile.ReadPosition">
+            <summary>Current byte offset of the read stream.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.SeekRead(System.Int64)">
+            <summary>
+            Seeks the read stream to <paramref name="position"/>.
+            Used to undo a <see cref="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.TryReadNext(ByTech.EmbeddedCommitLog.Consumer.LogRecord@)"/> call when the channel is full,
+            so the record is retried on the next drain attempt.
+            </summary>
+            <param name="position">Absolute byte offset to seek to.</param>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.DeleteAndDispose">
+            <summary>
+            Disposes both stream handles then deletes the spill file from disk.
+            Call after full replay is confirmed to reclaim disk space.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Consumer.SpillFile.Dispose">
             <inheritdoc/>
         </member>
         <member name="T:ByTech.EmbeddedCommitLog.Cursors.CursorData">
@@ -737,6 +968,12 @@
         <member name="F:ByTech.EmbeddedCommitLog.PeclErrorCode.EndOfLog">
             <summary>The consumer has reached the end of the written log; no more records are available.</summary>
         </member>
+        <member name="F:ByTech.EmbeddedCommitLog.PeclErrorCode.DecompressionFailed">
+            <summary>
+            A compressed record payload could not be decompressed.
+            This indicates a corrupt compressed payload or an unsupported algorithm id.
+            </summary>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.PeclError">
             <summary>
             Describes a failure that occurred during a PECL I/O or validation operation.
@@ -812,13 +1049,17 @@
             <summary>Creates a <see cref="F:ByTech.EmbeddedCommitLog.PeclErrorCode.EndOfLog"/> error.</summary>
             <param name="consumerName">The name of the consumer that has reached the tail of the log.</param>
         </member>
+        <member name="M:ByTech.EmbeddedCommitLog.PeclError.DecompressionFailed(System.String)">
+            <summary>Creates a <see cref="F:ByTech.EmbeddedCommitLog.PeclErrorCode.DecompressionFailed"/> error.</summary>
+            <param name="message">A description of the decompression failure.</param>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy">
             <summary>
             Controls what happens when a sink lane is at capacity during record routing.
             </summary>
             <remarks>
             This setting only affects push-mode consumers (those with at least one sink registered via
-            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink)"/>). Pull-mode consumers are unaffected.
+            <c>AddSink</c>). Pull-mode consumers are unaffected.
             </remarks>
         </member>
         <member name="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Block">
@@ -834,9 +1075,27 @@
             immediately if the lane is full. The reader loop never blocks; throughput is
             preserved at the cost of possible record loss.
             Dropped records are counted in <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SinkDropped"/> and
-            the <c>pecl.sink.dropped</c> metric (tagged by sink name).
+            the <c>pecl.sink.dropped_total</c> metric (tagged by sink name).
             Use only when occasional record loss is acceptable.
             </summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Spill">
+            <summary>
+            When a sink lane is full, overflow records are written to a local spill file
+            (<c>{root}/spill/{consumer}-{sink}.spill</c>) and replayed into the lane when
+            space becomes available. No records are lost; adds disk I/O overhead.
+            </summary>
+            <remarks>
+            <para>
+            Spill files use PECL record framing (<c>RecordWriter.Write</c>) and are crash-safe:
+            if the pipeline restarts before replay completes, the spill file is re-replayed on
+            next <c>Start()</c> (at-least-once delivery to <see cref="T:ByTech.EmbeddedCommitLog.Sinks.ISink"/>).
+            </para>
+            <para>
+            FIFO order is preserved: once a spill file exists for a lane, all subsequent
+            records go to the spill file rather than the channel to prevent reordering.
+            </para>
+            </remarks>
         </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.DurabilityMode">
             <summary>
@@ -876,6 +1135,34 @@
             compliance workloads where data loss is unacceptable.
             </summary>
         </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy">
+            <summary>
+            Controls the starting position for a consumer that has no cursor file when
+            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/> is called (first start, cursor deleted, or new consumer
+            registered before a previous run).
+            </summary>
+            <remarks>
+            The policy is applied only when the cursor file is absent or unreadable.
+            Consumers with a valid existing cursor file always resume from their recorded position,
+            regardless of this setting.
+            </remarks>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy.FromBeginning">
+            <summary>
+            Position the consumer at the oldest available record in the log (beginning of
+            the earliest retained segment). The consumer replays all existing records before
+            processing new ones. This is the default.
+            </summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy.FromTail">
+            <summary>
+            Position the consumer at the current log tail. All records written before
+            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/> returns are skipped; only records appended after
+            <c>Start</c> returns will be delivered.
+            Use this for consumers that only care about new events (e.g. live alerting sinks
+            that do not need historical replay).
+            </summary>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.PeclDrainException">
             <summary>
             Thrown (as an inner exception of <c>AggregateException</c>) by <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Stop"/>
@@ -912,6 +1199,41 @@
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PeclDrainTimeoutException.#ctor(System.Int32,System.Collections.Generic.IReadOnlyList{System.String})">
             <inheritdoc/>
         </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException">
+            <summary>
+            Thrown by <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.SeekConsumer(System.String,System.UInt64)"/> when the target sequence number
+            falls within a segment that has been deleted by retention GC.
+            </summary>
+            <remarks>
+            The caller must inspect <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException.EarliestAvailableSeqNo"/> and either adjust the
+            seek target or call <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ResetConsumer(System.String)"/> to move to the earliest
+            available position.
+            </remarks>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException.EarliestAvailableSeqNo">
+            <summary>The earliest sequence number currently available in the log.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException.#ctor(System.UInt64,System.String)">
+            <summary>
+            Initialises a new instance of <see cref="T:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException"/>.
+            </summary>
+            <param name="earliestAvailableSeqNo">
+            The earliest sequence number currently available in the log.
+            </param>
+            <param name="message">The error message.</param>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException.#ctor(System.UInt64,System.String,System.Exception)">
+            <summary>
+            Initialises a new instance of <see cref="T:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException"/> with an inner exception.
+            </summary>
+            <param name="earliestAvailableSeqNo">
+            The earliest sequence number currently available in the log.
+            </param>
+            <param name="message">The error message.</param>
+            <param name="innerException">
+            The exception that caused this exception, or <see langword="null"/>.
+            </param>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.Pipeline">
             <summary>
             The top-level coordinator that wires together segment writing, checkpoint persistence,
@@ -935,6 +1257,14 @@
             externally synchronized.
             </para>
             </remarks>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Pipeline.Pipeline._registeredConsumerNames">
+            <summary>
+            Preserves the names of all consumers ever registered via <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RegisterConsumer(System.String)"/>.
+            Unlike <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.Pipeline._consumers"/>, this set is never cleared — it survives
+            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Stop"/> so that <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.SeekConsumer(System.String,System.UInt64)"/> and <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ResetConsumer(System.String)"/>
+            can validate consumer names without requiring re-registration after each stop.
+            </summary>
         </member>
         <member name="F:ByTech.EmbeddedCommitLog.Pipeline.Pipeline._observabilityLock">
             <summary>
@@ -981,6 +1311,29 @@
             <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineConfiguration.MaxSegmentSize"/>. A single record must fit
             within one segment.
             </exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AppendBlock(System.Collections.Generic.IReadOnlyList{System.ReadOnlyMemory{System.Byte}},ByTech.EmbeddedCommitLog.Records.ContentType,System.UInt32)">
+            <summary>
+            Appends multiple payloads as a single block record and returns the block's globally
+            monotonic sequence number. The block is stored as one framed record on disk with
+            <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsBlock"/> set; push-mode consumers receive the entries as
+            individual <see cref="T:ByTech.EmbeddedCommitLog.Consumer.LogRecord"/> instances (transparent to
+            <see cref="T:ByTech.EmbeddedCommitLog.Sinks.ISink"/>). Pull-mode consumers receive the raw block record.
+            </summary>
+            <param name="entries">
+            Payloads to encode into the block. Must contain at least one entry.
+            All entries share the block frame's <paramref name="contentType"/> and
+            <paramref name="schemaId"/>.
+            </param>
+            <param name="contentType">Advisory payload encoding hint. Defaults to <see cref="F:ByTech.EmbeddedCommitLog.Records.ContentType.Unknown"/>.</param>
+            <param name="schemaId">Optional schema identifier. Defaults to 0 (none).</param>
+            <returns>The sequence number assigned to the block record.</returns>
+            <exception cref="T:System.ArgumentNullException"><paramref name="entries"/> is <see langword="null"/>.</exception>
+            <exception cref="T:System.ArgumentException">
+            <paramref name="entries"/> is empty, or the encoded block payload plus framing overhead
+            exceeds <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineConfiguration.MaxSegmentSize"/>.
+            </exception>
+            <exception cref="T:System.InvalidOperationException">The pipeline is not in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Running"/> state.</exception>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Flush">
             <summary>
@@ -1085,6 +1438,111 @@
             <paramref name="sinkName"/> is already registered for that consumer.
             </exception>
         </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink,ByTech.EmbeddedCommitLog.Records.ContentType)">
+            <summary>
+            Registers a sink for the named consumer, routing only records whose
+            <see cref="P:ByTech.EmbeddedCommitLog.Records.RecordHeader.ContentType"/> matches <paramref name="contentTypeFilter"/>.
+            Records that do not match any registered content-type filter are dropped and the
+            pipeline's drop counter is incremented with sink name <c>"*"</c>.
+            </summary>
+            <remarks>
+            All <c>AddSink</c> calls for a given consumer must use the same overload
+            (broadcast, content-type, or hash). Mixing raises <see cref="T:System.InvalidOperationException"/>.
+            </remarks>
+            <param name="consumerName">The name passed to <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RegisterConsumer(System.String)"/>.</param>
+            <param name="sinkName">A name unique within this consumer.</param>
+            <param name="sink">The sink implementation to receive filtered records.</param>
+            <param name="contentTypeFilter">
+            The <see cref="T:ByTech.EmbeddedCommitLog.Records.ContentType"/> value a record must carry to be forwarded to this sink.
+            </param>
+            <exception cref="T:System.ObjectDisposedException">The pipeline has been disposed.</exception>
+            <exception cref="T:System.InvalidOperationException">
+            The pipeline is not in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state,
+            no consumer with <paramref name="consumerName"/> is registered,
+            a sink named <paramref name="sinkName"/> is already registered for that consumer,
+            or the consumer already uses a different routing strategy.
+            </exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink,System.Func{ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Int32})">
+            <summary>
+            Registers a sink for the named consumer using hash-based routing. Records are
+            distributed across sinks by <c>abs(keySelector(record)) % sinkCount</c>.
+            </summary>
+            <remarks>
+            <para>
+            The <paramref name="keySelector"/> is captured from the first call for this consumer;
+            subsequent calls for the same consumer must use this overload but the
+            <paramref name="keySelector"/> parameter is ignored — the router retains the original selector.
+            </para>
+            <para>
+            All <c>AddSink</c> calls for a given consumer must use the same overload.
+            Mixing raises <see cref="T:System.InvalidOperationException"/>.
+            </para>
+            </remarks>
+            <param name="consumerName">The name passed to <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RegisterConsumer(System.String)"/>.</param>
+            <param name="sinkName">A name unique within this consumer.</param>
+            <param name="sink">The sink implementation to receive routed records.</param>
+            <param name="keySelector">
+            A function that extracts an integer routing key from a record. The key is reduced
+            modulo the number of registered sinks to select the target lane.
+            </param>
+            <exception cref="T:System.ObjectDisposedException">The pipeline has been disposed.</exception>
+            <exception cref="T:System.ArgumentNullException"><paramref name="keySelector"/> is <see langword="null"/>.</exception>
+            <exception cref="T:System.InvalidOperationException">
+            The pipeline is not in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state,
+            no consumer with <paramref name="consumerName"/> is registered,
+            a sink named <paramref name="sinkName"/> is already registered for that consumer,
+            or the consumer already uses a different routing strategy.
+            </exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.SeekConsumer(System.String,System.UInt64)">
+            <summary>
+            Moves the named consumer's cursor to the first record with
+            <see cref="P:ByTech.EmbeddedCommitLog.Records.RecordHeader.SeqNo"/> &gt;= <paramref name="seqNo"/>.
+            The cursor is persisted to disk immediately.
+            </summary>
+            <remarks>
+            The pipeline must be in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state.
+            Call <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Stop"/> or <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ForceStop"/> before seeking.
+            On the next <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/>, the consumer will resume from the seeked position.
+            </remarks>
+            <param name="consumerName">The name passed to <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RegisterConsumer(System.String)"/>.</param>
+            <param name="seqNo">Target sequence number (inclusive lower bound).</param>
+            <exception cref="T:System.ObjectDisposedException">The pipeline has been disposed.</exception>
+            <exception cref="T:System.InvalidOperationException">
+            The pipeline is not in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state,
+            or <paramref name="consumerName"/> is not registered.
+            </exception>
+            <exception cref="T:System.ArgumentOutOfRangeException">
+            <paramref name="seqNo"/> is beyond the log tail, or the log is empty.
+            </exception>
+            <exception cref="T:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException">
+            <paramref name="seqNo"/> falls within a segment that has been deleted by retention GC.
+            <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PeclSeekException.EarliestAvailableSeqNo"/> contains the floor value.
+            </exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ResetConsumer(System.String)">
+            <summary>
+            Resets the named consumer's cursor to the earliest available record in the log.
+            </summary>
+            <remarks>
+            <para>
+            The pipeline must be in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state.
+            When the log is empty, a zeroed cursor is written and the consumer will start
+            from the beginning on the next <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/>.
+            </para>
+            <para>
+            When old segments have been deleted by retention GC, this method moves the cursor
+            to the first record of the oldest remaining segment (not necessarily SeqNo 0).
+            </para>
+            </remarks>
+            <param name="consumerName">The name passed to <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RegisterConsumer(System.String)"/>.</param>
+            <exception cref="T:System.ObjectDisposedException">The pipeline has been disposed.</exception>
+            <exception cref="T:System.InvalidOperationException">
+            The pipeline is not in the <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.PipelineState.Stopped"/> state,
+            or <paramref name="consumerName"/> is not registered.
+            </exception>
+        </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ReadNext(System.String)">
             <summary>
             Reads the next record for the named consumer.
@@ -1131,6 +1589,13 @@
             This method is idempotent.
             </summary>
         </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.DeleteOrphanedSpillFiles">
+            <summary>
+            Deletes spill files in <c>{root}/spill/</c> that have no matching registered consumer+sink.
+            Called at the end of <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/> setup so orphaned files from deregistered
+            sinks do not accumulate on disk indefinitely.
+            </summary>
+        </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.WriteCheckpointCore(System.UInt32,System.Int64,System.UInt64,System.UInt32)">
              <remarks>
              During segment rollover, this method is called after the new writer is opened.
@@ -1141,6 +1606,39 @@
             
              During a non-rollover flush, <c>lastSegId == activeSegId == _writer.SegmentId</c>.
              </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ReadFirstSeqNoFromSegment(System.UInt32)">
+            <summary>
+            Opens <paramref name="segId"/> read-only and returns the <c>SeqNo</c> of its first record.
+            </summary>
+            <exception cref="T:System.IO.InvalidDataException">
+            The segment is unreadable or contains no valid records.
+            </exception>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ReadLastSeqNoFromSegment(System.UInt32)">
+            <summary>
+            Opens <paramref name="segId"/> read-only and returns the <c>SeqNo</c> of its last valid record.
+            Returns <c>0</c> if the segment contains no valid records.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ScanSegmentForSeqNo(System.UInt32,System.UInt64)">
+            <summary>
+            Scans <paramref name="segId"/> and returns the byte offset of the first record
+            whose <c>SeqNo</c> is &gt;= <paramref name="targetSeqNo"/>.
+            Returns the end-of-stream position if no such record exists.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.RouteRecordAsync(ByTech.EmbeddedCommitLog.Records.RecordReadResult,ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState,System.UInt32)">
+            <summary>
+            Routes a single read result to all sink lanes, expanding block records into
+            individual entries transparently before routing.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ComputeSegmentBytes(System.Collections.Generic.IReadOnlyList{System.UInt32})">
+            <summary>
+            Sums the on-disk sizes of all segment files identified by <paramref name="segIds"/>.
+            Files that have been deleted concurrently are silently skipped.
+            </summary>
         </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState">
             <summary>
@@ -1202,12 +1700,19 @@
             <summary>Byte offset within <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.CurrentSegmentId"/> from which the next read will start.</summary>
         </member>
         <member name="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.SinkSlots">
-            <summary>Sink slots registered via <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink)"/>.</summary>
+            <summary>Sink slots registered via <c>AddSink</c>.</summary>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.Router">
+            <summary>
+            The routing strategy for this consumer. <see langword="null"/> means broadcast
+            (the pipeline-level <c>_router</c> is used). Set by the content-type and
+            hash-routing <c>AddSink</c> overloads.
+            </summary>
         </member>
         <member name="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.Lanes">
             <summary>
-            Read-only view of the sink lanes, passed to <see cref="M:ByTech.EmbeddedCommitLog.Consumer.BroadcastRouter.RouteAsync(ByTech.EmbeddedCommitLog.Consumer.LogRecord,System.Collections.Generic.IReadOnlyList{ByTech.EmbeddedCommitLog.Consumer.SinkLane},System.Threading.CancellationToken)"/>.
-            Kept in sync with <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.SinkSlots"/> by <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink)"/>.
+            Read-only view of the sink lanes, passed to the router's <c>RouteAsync</c>.
+            Kept in sync with <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.SinkSlots"/> by <c>AddSink</c>.
             </summary>
         </member>
         <member name="P:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ConsumerState.IsPushMode">
@@ -1422,6 +1927,34 @@
             instrument name collisions. Defaults to <c>"pecl"</c>.
             </summary>
         </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineConfiguration.CompressionAlgorithm">
+            <summary>
+            Compression algorithm applied to record payloads before writing to disk.
+            Defaults to <see cref="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.None"/> (no compression).
+            </summary>
+            <remarks>
+            Compression is transparent to consumers — <see cref="P:ByTech.EmbeddedCommitLog.Consumer.LogRecord.Payload"/>
+            always contains decompressed bytes. When <see cref="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.Brotli"/>
+            is configured, payloads that do not compress (compressed size &gt;= original)
+            are stored uncompressed automatically.
+            </remarks>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineConfiguration.MissingCursorPolicy">
+            <summary>
+            Determines the starting position for a consumer whose cursor file is absent on
+            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/> (first start, cursor deleted, or new consumer).
+            Defaults to <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy.FromBeginning"/>.
+            </summary>
+            <remarks>
+            <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy.FromBeginning"/> replays all records from the
+            oldest available segment — the safe default for new consumers. <br/>
+            <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.MissingCursorPolicy.FromTail"/> skips all existing records; only
+            records appended after <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/> returns are delivered.
+            Use this for consumers that only care about new events and do not need
+            historical replay. <br/>
+            This property is ignored when a valid cursor file already exists for the consumer.
+            </remarks>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics">
             <summary>
             Exposes live operational counters for a <see cref="T:ByTech.EmbeddedCommitLog.Pipeline.Pipeline"/> instance and publishes
@@ -1513,11 +2046,29 @@
             <see cref="F:ByTech.EmbeddedCommitLog.Pipeline.BackpressurePolicy.Block"/> is used.
             </summary>
         </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.ConsumerReadRate">
+            <summary>
+            Total records successfully read via <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.ReadNext(System.String)"/> since the pipeline
+            was last started.
+            </summary>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecoveryDurationMs">
+            <summary>
+            Duration of the most recent recovery scan in milliseconds.
+            Reset to zero at each <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/>.
+            </summary>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SegmentBytes">
+            <summary>
+            Total on-disk bytes across all segment files as of the last GC pass
+            (or pipeline start if GC has not yet run).
+            </summary>
+        </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.IncrementRecordsAppended">
-            <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecordsAppended"/> and the <c>pecl.records.appended</c> counter.</summary>
+            <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecordsAppended"/> and the <c>pecl.write.records_total</c> counter.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.AddBytesAppended(System.Int64)">
-            <summary>Atomically adds <paramref name="bytes"/> to <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.BytesAppended"/> and the <c>pecl.bytes.appended</c> counter.</summary>
+            <summary>Atomically adds <paramref name="bytes"/> to <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.BytesAppended"/> and the <c>pecl.write.bytes_total</c> counter.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.IncrementFlushCount">
             <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.FlushCount"/> and the <c>pecl.flushes</c> counter.</summary>
@@ -1532,16 +2083,31 @@
             <summary>Atomically replaces <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecoveryTruncatedBytes"/> with <paramref name="bytes"/>. Reset to zero at each <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/>.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.IncrementSegmentsDeleted">
-            <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SegmentsDeleted"/> and the <c>pecl.segments.deleted</c> counter.</summary>
+            <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SegmentsDeleted"/> and the <c>pecl.segment.deleted</c> counter.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SetSegmentCount(System.Int64)">
             <summary>Atomically replaces <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SegmentCount"/> with <paramref name="count"/>. Updated after each GC pass and at pipeline start.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.IncrementSinkDropped(System.String)">
             <summary>
-            Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SinkDropped"/> and the <c>pecl.sink.dropped</c>
+            Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SinkDropped"/> and the <c>pecl.sink.dropped_total</c>
             counter, tagged with the name of the sink that dropped the record.
             </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.IncrementConsumerReadRate">
+            <summary>Atomically increments <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.ConsumerReadRate"/> and the <c>pecl.consumer.read_rate</c> counter.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecordFsyncDuration(System.Double)">
+            <summary>Records a single fsync wall-clock measurement in milliseconds.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecordBatchSize(System.Int64)">
+            <summary>Records the group-commit batch size (records since last flush).</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SetRecoveryDurationMs(System.Int64)">
+            <summary>Atomically replaces <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.RecoveryDurationMs"/> with <paramref name="ms"/>. Reset to zero on each <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.Start"/>.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SetSegmentBytes(System.Int64)">
+            <summary>Atomically replaces <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.SegmentBytes"/> with <paramref name="bytes"/>. Updated after each GC pass and at pipeline start.</summary>
         </member>
         <member name="M:ByTech.EmbeddedCommitLog.Pipeline.PipelineMetrics.StartObservableInstruments(System.Func{System.Collections.Generic.IEnumerable{System.Diagnostics.Metrics.Measurement{System.Int64}}},System.Func{System.Collections.Generic.IEnumerable{System.Diagnostics.Metrics.Measurement{System.Int64}}})">
             <summary>
@@ -1560,7 +2126,7 @@
             <remarks>
             The <c>pecl.consumer.lag</c> gauge reports measurements for push-mode consumers
             only (consumers registered with at least one sink via
-            <see cref="M:ByTech.EmbeddedCommitLog.Pipeline.Pipeline.AddSink(System.String,System.String,ByTech.EmbeddedCommitLog.Sinks.ISink)"/>). Pull-mode consumers do not set
+            <c>AddSink</c>). Pull-mode consumers do not set
             <c>LastRoutedSeqNo</c> and are excluded from this gauge. A pull-mode consumer
             that is far behind the log tail will not appear in this metric.
             </remarks>
@@ -1648,6 +2214,101 @@
             within the configured limit. The active (writable) segment is never deleted.
             </remarks>
         </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader">
+            <summary>
+            Decodes a block payload produced by <see cref="T:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter"/> into individual
+            entry payloads. Designed as a <see langword="ref struct"/> for zero-allocation, stack-only
+            sequential decoding.
+            </summary>
+            <remarks>
+            <para>
+            Construct with the raw block payload span (the bytes stored after the record header).
+            Call <see cref="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader.TryReadNext(System.ReadOnlySpan{System.Byte}@)"/> in a loop until it returns <see langword="false"/>.
+            </para>
+            <para>
+            The returned <see cref="T:System.ReadOnlySpan`1"/> slices are valid only as long as the original
+            buffer passed to the constructor is alive.
+            </para>
+            </remarks>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader.#ctor(System.ReadOnlySpan{System.Byte})">
+            <summary>
+            Initialises a new <see cref="T:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader"/> over <paramref name="blockPayload"/>.
+            </summary>
+            <param name="blockPayload">
+            The raw block payload bytes — the 4-byte entry count followed by the encoded entries.
+            </param>
+        </member>
+        <member name="P:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader.EntryCount">
+            <summary>Total number of entries encoded in the block payload.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadReader.TryReadNext(System.ReadOnlySpan{System.Byte}@)">
+            <summary>
+            Reads the next entry payload from the block.
+            </summary>
+            <param name="payload">
+            On success, a <see cref="T:System.ReadOnlySpan`1"/> over the entry bytes. The span is a slice
+            of the original buffer passed to the constructor.
+            </param>
+            <returns>
+            <see langword="true"/> when an entry was successfully read;
+            <see langword="false"/> when all entries have been consumed or the buffer is malformed.
+            </returns>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter">
+            <summary>
+            Encodes a list of raw byte payloads into a single block payload suitable for
+            storage as a <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsBlock"/> record.
+            </summary>
+            <remarks>
+            Block payload wire format (all multi-byte fields little-endian):
+            <code>
+            [4 bytes: entry count (uint)]
+            for each entry:
+                [4 bytes: payload length (int)]
+                [payload bytes]
+            </code>
+            All entries share the block frame's <c>ContentType</c> and <c>SchemaId</c>.
+            </remarks>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter.HeaderSize">
+            <summary>Byte size of the block header (entry count field).</summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter.EntryLengthSize">
+            <summary>Byte size of the per-entry length prefix.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter.ComputeSize(System.Collections.Generic.IReadOnlyList{System.ReadOnlyMemory{System.Byte}})">
+            <summary>
+            Computes the total encoded byte length for a block payload containing
+            <paramref name="entries"/>.
+            </summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter.Write(System.Collections.Generic.IReadOnlyList{System.ReadOnlyMemory{System.Byte}},System.Span{System.Byte})">
+            <summary>
+            Writes the block payload encoding of <paramref name="entries"/> into
+            <paramref name="destination"/>. The span must be exactly
+            <see cref="M:ByTech.EmbeddedCommitLog.Records.BlockPayloadWriter.ComputeSize(System.Collections.Generic.IReadOnlyList{System.ReadOnlyMemory{System.Byte}})"/> bytes long.
+            </summary>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm">
+            <summary>Compression algorithm applied to record payloads before writing to disk.</summary>
+            <remarks>
+            Compression is transparent to consumers —
+            <see cref="P:ByTech.EmbeddedCommitLog.Consumer.LogRecord.Payload"/> always contains decompressed bytes.
+            Configure via <see cref="P:ByTech.EmbeddedCommitLog.Pipeline.PipelineConfiguration.CompressionAlgorithm"/>.
+            </remarks>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.None">
+            <summary>No compression. Default.</summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.Brotli">
+            <summary>
+            Brotli compression at quality level 1.
+            Uses <see cref="T:System.IO.Compression.BrotliEncoder"/>.
+            Payloads that do not compress (compressed size &gt;= original) are stored
+            uncompressed automatically.
+            </summary>
+        </member>
         <member name="T:ByTech.EmbeddedCommitLog.Records.ContentType">
             <summary>
             Advisory hint stored at byte offset 6 of a PECL record header describing
@@ -1709,7 +2370,13 @@
             Controls record-type classification and compression.
             </summary>
             <remarks>
-            Bits 2–7 are reserved and must be zero in the current format version.
+            Bit layout:
+            <list type="bullet">
+            <item>Bit 0 — <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsBlock"/>: multi-entry block record (reserved for future use)</item>
+            <item>Bit 1 — <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsCompressed"/>: payload is compressed</item>
+            <item>Bits 2–3 — <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg0"/>/<see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg1"/>: algorithm id (00=None, 01=Brotli)</item>
+            <item>Bits 4–7 — reserved, must be zero</item>
+            </list>
             Readers should ignore unknown bits to allow forward compatibility.
             </remarks>
         </member>
@@ -1725,9 +2392,24 @@
         </member>
         <member name="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsCompressed">
             <summary>
-            The payload is compressed. The algorithm will be indicated by the
-            <see cref="T:ByTech.EmbeddedCommitLog.Records.ContentType"/> field once compression support is added
-            in Phase 3. Phase 1 writers never set this flag.
+            The payload is compressed. The compression algorithm is encoded in bits 2–3
+            (<see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg0"/> and <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg1"/>).
+            Use <see cref="M:ByTech.EmbeddedCommitLog.Records.RecordFlagsExtensions.GetCompressionAlgorithm(ByTech.EmbeddedCommitLog.Records.RecordFlags)"/> to decode.
+            </summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg0">
+            <summary>Compression algorithm bit 0 (LSB of the 2-bit algorithm field in bits 2–3).</summary>
+        </member>
+        <member name="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.CompressionAlg1">
+            <summary>Compression algorithm bit 1 (MSB of the 2-bit algorithm field in bits 2–3).</summary>
+        </member>
+        <member name="T:ByTech.EmbeddedCommitLog.Records.RecordFlagsExtensions">
+            <summary>Extension helpers for <see cref="T:ByTech.EmbeddedCommitLog.Records.RecordFlags"/>.</summary>
+        </member>
+        <member name="M:ByTech.EmbeddedCommitLog.Records.RecordFlagsExtensions.GetCompressionAlgorithm(ByTech.EmbeddedCommitLog.Records.RecordFlags)">
+            <summary>
+            Extracts the <see cref="T:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm"/> encoded in bits 2–3 of <paramref name="flags"/>.
+            Returns <see cref="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.None"/> when <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.IsCompressed"/> is clear.
             </summary>
         </member>
         <member name="T:ByTech.EmbeddedCommitLog.Records.RecordFooter">
@@ -1931,7 +2613,7 @@
             Total fixed framing overhead per record in bytes (header + footer), excluding the payload.
             </summary>
         </member>
-        <member name="M:ByTech.EmbeddedCommitLog.Records.RecordWriter.Write(System.IO.Stream,System.ReadOnlySpan{System.Byte},System.UInt64,ByTech.EmbeddedCommitLog.Records.ContentType,ByTech.EmbeddedCommitLog.Records.RecordFlags,System.UInt32)">
+        <member name="M:ByTech.EmbeddedCommitLog.Records.RecordWriter.Write(System.IO.Stream,System.ReadOnlySpan{System.Byte},System.UInt64,ByTech.EmbeddedCommitLog.Records.ContentType,ByTech.EmbeddedCommitLog.Records.RecordFlags,System.UInt32,ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm)">
             <summary>
             Writes a single framed PECL record to <paramref name="destination"/>.
             </summary>
@@ -1950,9 +2632,15 @@
             <param name="contentType">Advisory payload encoding hint. Default: <see cref="F:ByTech.EmbeddedCommitLog.Records.ContentType.Unknown"/>.</param>
             <param name="flags">Record-level flags. Default: <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordFlags.None"/>.</param>
             <param name="schemaId">Schema registry identifier. Pass <c>0</c> when unused.</param>
+            <param name="compression">
+            Compression algorithm to apply to the payload before writing. When the compressed
+            size is not smaller than the original the record is stored uncompressed.
+            Default: <see cref="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.None"/>.
+            </param>
             <returns>
             Total bytes written to <paramref name="destination"/>:
-            <c><see cref="F:ByTech.EmbeddedCommitLog.Records.RecordWriter.FramingOverhead"/> + payload.Length</c>.
+            <c><see cref="F:ByTech.EmbeddedCommitLog.Records.RecordWriter.FramingOverhead"/> + effective payload length</c> (which may differ
+            from <c>payload.Length</c> when compression reduces the size).
             The return type is <see langword="long"/> to avoid overflow for near-maximum payloads.
             </returns>
             <exception cref="T:System.ArgumentNullException"><paramref name="destination"/> is <see langword="null"/>.</exception>
@@ -2157,7 +2845,7 @@
             the configured maximum segment size. No further <see cref="M:ByTech.EmbeddedCommitLog.Segments.SegmentWriter.Append(System.ReadOnlySpan{System.Byte},System.UInt64,ByTech.EmbeddedCommitLog.Records.ContentType,ByTech.EmbeddedCommitLog.Records.RecordFlags,System.UInt32)"/> calls are permitted.
             </summary>
         </member>
-        <member name="M:ByTech.EmbeddedCommitLog.Segments.SegmentWriter.#ctor(System.String,System.UInt32,System.Int64)">
+        <member name="M:ByTech.EmbeddedCommitLog.Segments.SegmentWriter.#ctor(System.String,System.UInt32,System.Int64,ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm)">
             <summary>
             Opens or creates the segment file for the given identifier and prepares it for appending.
             If the file already exists, writing resumes at the current end.
@@ -2170,6 +2858,10 @@
             <param name="maxSegmentSize">
             Maximum number of bytes this segment may hold. Must be at least
             <see cref="F:ByTech.EmbeddedCommitLog.Records.RecordWriter.FramingOverhead"/> (28 bytes — enough for one empty record).
+            </param>
+            <param name="compression">
+            Compression algorithm applied to every record appended to this segment.
+            Defaults to <see cref="F:ByTech.EmbeddedCommitLog.Records.CompressionAlgorithm.None"/>.
             </param>
             <exception cref="T:System.ArgumentNullException"><paramref name="segmentsDirectory"/> is <see langword="null"/>.</exception>
             <exception cref="T:System.ArgumentOutOfRangeException">

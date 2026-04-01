@@ -5,7 +5,13 @@ namespace ByTech.EmbeddedCommitLog.Records;
 /// Controls record-type classification and compression.
 /// </summary>
 /// <remarks>
-/// Bits 2–7 are reserved and must be zero in the current format version.
+/// Bit layout:
+/// <list type="bullet">
+/// <item>Bit 0 — <see cref="IsBlock"/>: multi-entry block record (reserved for future use)</item>
+/// <item>Bit 1 — <see cref="IsCompressed"/>: payload is compressed</item>
+/// <item>Bits 2–3 — <see cref="CompressionAlg0"/>/<see cref="CompressionAlg1"/>: algorithm id (00=None, 01=Brotli)</item>
+/// <item>Bits 4–7 — reserved, must be zero</item>
+/// </list>
 /// Readers should ignore unknown bits to allow forward compatibility.
 /// </remarks>
 [Flags]
@@ -22,9 +28,36 @@ public enum RecordFlags : byte
     IsBlock = 1 << 0,
 
     /// <summary>
-    /// The payload is compressed. The algorithm will be indicated by the
-    /// <see cref="ContentType"/> field once compression support is added
-    /// in Phase 3. Phase 1 writers never set this flag.
+    /// The payload is compressed. The compression algorithm is encoded in bits 2–3
+    /// (<see cref="CompressionAlg0"/> and <see cref="CompressionAlg1"/>).
+    /// Use <see cref="RecordFlagsExtensions.GetCompressionAlgorithm"/> to decode.
     /// </summary>
     IsCompressed = 1 << 1,
+
+    /// <summary>Compression algorithm bit 0 (LSB of the 2-bit algorithm field in bits 2–3).</summary>
+    CompressionAlg0 = 1 << 2,
+
+    /// <summary>Compression algorithm bit 1 (MSB of the 2-bit algorithm field in bits 2–3).</summary>
+    CompressionAlg1 = 1 << 3,
+}
+
+/// <summary>Extension helpers for <see cref="RecordFlags"/>.</summary>
+internal static class RecordFlagsExtensions
+{
+    private const RecordFlags AlgorithmMask = RecordFlags.CompressionAlg0 | RecordFlags.CompressionAlg1;
+
+    /// <summary>
+    /// Extracts the <see cref="CompressionAlgorithm"/> encoded in bits 2–3 of <paramref name="flags"/>.
+    /// Returns <see cref="CompressionAlgorithm.None"/> when <see cref="RecordFlags.IsCompressed"/> is clear.
+    /// </summary>
+    internal static CompressionAlgorithm GetCompressionAlgorithm(this RecordFlags flags)
+    {
+        if ((flags & RecordFlags.IsCompressed) == 0)
+        {
+            return CompressionAlgorithm.None;
+        }
+
+        int algId = (int)(flags & AlgorithmMask) >> 2;
+        return (CompressionAlgorithm)algId;
+    }
 }

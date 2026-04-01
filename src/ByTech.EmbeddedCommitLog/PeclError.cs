@@ -56,6 +56,12 @@ public enum PeclErrorCode
 
     /// <summary>The consumer has reached the end of the written log; no more records are available.</summary>
     EndOfLog = 13,
+
+    /// <summary>
+    /// A compressed record payload could not be decompressed.
+    /// This indicates a corrupt compressed payload or an unsupported algorithm id.
+    /// </summary>
+    DecompressionFailed = 14,
 }
 
 /// <summary>
@@ -145,4 +151,9 @@ public sealed record PeclError(PeclErrorCode Code, string Message)
     public static PeclError EndOfLog(string consumerName) =>
         new(PeclErrorCode.EndOfLog,
             $"Consumer '{consumerName}' has reached the end of the log.");
+
+    /// <summary>Creates a <see cref="PeclErrorCode.DecompressionFailed"/> error.</summary>
+    /// <param name="message">A description of the decompression failure.</param>
+    public static PeclError DecompressionFailed(string message) =>
+        new(PeclErrorCode.DecompressionFailed, message);
 }

@@ -28,6 +28,11 @@ public sealed class PipelineMetrics : IDisposable
     private long _segmentsDeleted;
     private long _segmentCount;
     private long _sinkDropped;
+    private long _consumerReadRate;
+
+    // Extended gauge backing fields
+    private long _recoveryDurationMs;   // set per Start(); read by observable gauge
+    private long _segmentBytes;         // set per GC pass + Start(); read by observable gauge
 
     private readonly Meter _meter;
     private readonly Counter<long> _recordsAppendedInstr;
@@ -37,6 +42,12 @@ public sealed class PipelineMetrics : IDisposable
     private readonly Counter<long> _recoveryCountInstr;
     private readonly Counter<long> _segmentsDeletedInstr;
     private readonly Counter<long> _sinkDroppedInstr;
+    private readonly Counter<long> _consumerReadRateInstr;
+
+    // Histogram instruments
+    private readonly Histogram<double> _fsyncDurationInstr;
+    private readonly Histogram<long> _batchSizeInstr;
+
     private bool _observablesRegistered;
     private bool _disposed;
 
@@ -51,14 +62,23 @@ public sealed class PipelineMetrics : IDisposable
     public PipelineMetrics(string meterName)
     {
         _meter = new Meter(meterName, "1.0");
-        _recordsAppendedInstr = _meter.CreateCounter<long>("pecl.records.appended", "records");
-        _bytesAppendedInstr = _meter.CreateCounter<long>("pecl.bytes.appended", "bytes");
+        _recordsAppendedInstr = _meter.CreateCounter<long>("pecl.write.records_total", "records");
+        _bytesAppendedInstr = _meter.CreateCounter<long>("pecl.write.bytes_total", "bytes");
         _flushCountInstr = _meter.CreateCounter<long>("pecl.flushes", "flushes");
         _segmentRolloversInstr = _meter.CreateCounter<long>("pecl.segment.rollovers", "rollovers");
         _recoveryCountInstr = _meter.CreateCounter<long>("pecl.recovery.count", "recoveries");
-        _segmentsDeletedInstr = _meter.CreateCounter<long>("pecl.segments.deleted", "segments");
+        _segmentsDeletedInstr = _meter.CreateCounter<long>("pecl.segment.deleted", "segments");
 
-        _sinkDroppedInstr = _meter.CreateCounter<long>("pecl.sink.dropped", "records");
+        _sinkDroppedInstr = _meter.CreateCounter<long>("pecl.sink.dropped_total", "records");
+        _consumerReadRateInstr = _meter.CreateCounter<long>("pecl.consumer.read_rate", "records");
+
+        _fsyncDurationInstr = _meter.CreateHistogram<double>(
+            "pecl.write.fsync_duration", "ms",
+            "Wall-clock time of each FlushToDisk (fsync) call.");
+
+        _batchSizeInstr = _meter.CreateHistogram<long>(
+            "pecl.write.batch_size", "records",
+            "Records appended since the previous flush (group-commit size).");
     }
 
     /// <summary>
@@ -125,14 +145,32 @@ public sealed class PipelineMetrics : IDisposable
     /// </summary>
     public long SinkDropped => Interlocked.Read(ref _sinkDropped);
 
-    /// <summary>Atomically increments <see cref="RecordsAppended"/> and the <c>pecl.records.appended</c> counter.</summary>
+    /// <summary>
+    /// Total records successfully read via <see cref="Pipeline.ReadNext"/> since the pipeline
+    /// was last started.
+    /// </summary>
+    public long ConsumerReadRate => Interlocked.Read(ref _consumerReadRate);
+
+    /// <summary>
+    /// Duration of the most recent recovery scan in milliseconds.
+    /// Reset to zero at each <see cref="Pipeline.Start"/>.
+    /// </summary>
+    public long RecoveryDurationMs => Interlocked.Read(ref _recoveryDurationMs);
+
+    /// <summary>
+    /// Total on-disk bytes across all segment files as of the last GC pass
+    /// (or pipeline start if GC has not yet run).
+    /// </summary>
+    public long SegmentBytes => Interlocked.Read(ref _segmentBytes);
+
+    /// <summary>Atomically increments <see cref="RecordsAppended"/> and the <c>pecl.write.records_total</c> counter.</summary>
     internal void IncrementRecordsAppended()
     {
         Interlocked.Increment(ref _recordsAppended);
         _recordsAppendedInstr.Add(1);
     }
 
-    /// <summary>Atomically adds <paramref name="bytes"/> to <see cref="BytesAppended"/> and the <c>pecl.bytes.appended</c> counter.</summary>
+    /// <summary>Atomically adds <paramref name="bytes"/> to <see cref="BytesAppended"/> and the <c>pecl.write.bytes_total</c> counter.</summary>
     internal void AddBytesAppended(long bytes)
     {
         Interlocked.Add(ref _bytesAppended, bytes);
@@ -164,7 +202,7 @@ public sealed class PipelineMetrics : IDisposable
     internal void SetRecoveryTruncatedBytes(long bytes) =>
         Interlocked.Exchange(ref _recoveryTruncatedBytes, bytes);
 
-    /// <summary>Atomically increments <see cref="SegmentsDeleted"/> and the <c>pecl.segments.deleted</c> counter.</summary>
+    /// <summary>Atomically increments <see cref="SegmentsDeleted"/> and the <c>pecl.segment.deleted</c> counter.</summary>
     internal void IncrementSegmentsDeleted()
     {
         Interlocked.Increment(ref _segmentsDeleted);
@@ -176,7 +214,7 @@ public sealed class PipelineMetrics : IDisposable
         Interlocked.Exchange(ref _segmentCount, count);
 
     /// <summary>
-    /// Atomically increments <see cref="SinkDropped"/> and the <c>pecl.sink.dropped</c>
+    /// Atomically increments <see cref="SinkDropped"/> and the <c>pecl.sink.dropped_total</c>
     /// counter, tagged with the name of the sink that dropped the record.
     /// </summary>
     internal void IncrementSinkDropped(string sinkName)
@@ -184,6 +222,27 @@ public sealed class PipelineMetrics : IDisposable
         Interlocked.Increment(ref _sinkDropped);
         _sinkDroppedInstr.Add(1, new KeyValuePair<string, object?>("sink", sinkName));
     }
+
+    /// <summary>Atomically increments <see cref="ConsumerReadRate"/> and the <c>pecl.consumer.read_rate</c> counter.</summary>
+    internal void IncrementConsumerReadRate()
+    {
+        Interlocked.Increment(ref _consumerReadRate);
+        _consumerReadRateInstr.Add(1);
+    }
+
+    /// <summary>Records a single fsync wall-clock measurement in milliseconds.</summary>
+    internal void RecordFsyncDuration(double ms) => _fsyncDurationInstr.Record(ms);
+
+    /// <summary>Records the group-commit batch size (records since last flush).</summary>
+    internal void RecordBatchSize(long count) => _batchSizeInstr.Record(count);
+
+    /// <summary>Atomically replaces <see cref="RecoveryDurationMs"/> with <paramref name="ms"/>. Reset to zero on each <see cref="Pipeline.Start"/>.</summary>
+    internal void SetRecoveryDurationMs(long ms) =>
+        Interlocked.Exchange(ref _recoveryDurationMs, ms);
+
+    /// <summary>Atomically replaces <see cref="SegmentBytes"/> with <paramref name="bytes"/>. Updated after each GC pass and at pipeline start.</summary>
+    internal void SetSegmentBytes(long bytes) =>
+        Interlocked.Exchange(ref _segmentBytes, bytes);
 
     /// <summary>
     /// Registers <see cref="ObservableGauge{T}"/> instruments for consumer lag,
@@ -201,7 +260,7 @@ public sealed class PipelineMetrics : IDisposable
     /// <remarks>
     /// The <c>pecl.consumer.lag</c> gauge reports measurements for push-mode consumers
     /// only (consumers registered with at least one sink via
-    /// <see cref="Pipeline.AddSink"/>). Pull-mode consumers do not set
+    /// <c>AddSink</c>). Pull-mode consumers do not set
     /// <c>LastRoutedSeqNo</c> and are excluded from this gauge. A pull-mode consumer
     /// that is far behind the log tail will not appear in this metric.
     /// </remarks>
@@ -221,13 +280,28 @@ public sealed class PipelineMetrics : IDisposable
             "Records between a push-mode consumer cursor and the log tail.");
 
         _meter.CreateObservableGauge<long>(
-            "pecl.sink.lane.depth", laneDepthObserver, "records",
+            "pecl.sink.lane_depth", laneDepthObserver, "records",
             "Approximate records buffered in each sink lane.");
 
         _meter.CreateObservableGauge<long>(
-            "pecl.segments.count",
+            "pecl.segment.count",
             () => [new Measurement<long>(SegmentCount)],
             "segments", "Current segment file count.");
+
+        _meter.CreateObservableGauge<long>(
+            "pecl.recovery.duration",
+            () => [new Measurement<long>(RecoveryDurationMs)],
+            "ms", "Duration of the most recent recovery scan.");
+
+        _meter.CreateObservableGauge<long>(
+            "pecl.recovery.truncated_bytes",
+            () => [new Measurement<long>(RecoveryTruncatedBytes)],
+            "bytes", "Bytes removed from the tail segment during the most recent recovery.");
+
+        _meter.CreateObservableGauge<long>(
+            "pecl.segment.bytes",
+            () => [new Measurement<long>(SegmentBytes)],
+            "bytes", "Total on-disk bytes across all segment files.");
     }
 
     /// <inheritdoc/>

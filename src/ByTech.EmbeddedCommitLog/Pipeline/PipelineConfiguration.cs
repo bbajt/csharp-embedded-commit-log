@@ -143,4 +143,32 @@ public sealed record PipelineConfiguration
     /// instrument name collisions. Defaults to <c>"pecl"</c>.
     /// </summary>
     public string MeterName { get; init; } = "pecl";
+
+    /// <summary>
+    /// Compression algorithm applied to record payloads before writing to disk.
+    /// Defaults to <see cref="Records.CompressionAlgorithm.None"/> (no compression).
+    /// </summary>
+    /// <remarks>
+    /// Compression is transparent to consumers — <see cref="Consumer.LogRecord.Payload"/>
+    /// always contains decompressed bytes. When <see cref="Records.CompressionAlgorithm.Brotli"/>
+    /// is configured, payloads that do not compress (compressed size &gt;= original)
+    /// are stored uncompressed automatically.
+    /// </remarks>
+    public Records.CompressionAlgorithm CompressionAlgorithm { get; init; } = Records.CompressionAlgorithm.None;
+
+    /// <summary>
+    /// Determines the starting position for a consumer whose cursor file is absent on
+    /// <see cref="Pipeline.Start"/> (first start, cursor deleted, or new consumer).
+    /// Defaults to <see cref="MissingCursorPolicy.FromBeginning"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="MissingCursorPolicy.FromBeginning"/> replays all records from the
+    /// oldest available segment — the safe default for new consumers. <br/>
+    /// <see cref="MissingCursorPolicy.FromTail"/> skips all existing records; only
+    /// records appended after <see cref="Pipeline.Start"/> returns are delivered.
+    /// Use this for consumers that only care about new events and do not need
+    /// historical replay. <br/>
+    /// This property is ignored when a valid cursor file already exists for the consumer.
+    /// </remarks>
+    public MissingCursorPolicy MissingCursorPolicy { get; init; } = MissingCursorPolicy.FromBeginning;
 }

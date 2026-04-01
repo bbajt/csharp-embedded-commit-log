@@ -33,6 +33,7 @@ public sealed class SegmentWriter : IDisposable
 
     private readonly FileStream _stream;
     private readonly long _maxSegmentSize;
+    private readonly CompressionAlgorithm _compression;
     private bool _sealed;
     private bool _disposed;
 
@@ -74,6 +75,10 @@ public sealed class SegmentWriter : IDisposable
     /// Maximum number of bytes this segment may hold. Must be at least
     /// <see cref="RecordWriter.FramingOverhead"/> (28 bytes — enough for one empty record).
     /// </param>
+    /// <param name="compression">
+    /// Compression algorithm applied to every record appended to this segment.
+    /// Defaults to <see cref="CompressionAlgorithm.None"/>.
+    /// </param>
     /// <exception cref="ArgumentNullException"><paramref name="segmentsDirectory"/> is <see langword="null"/>.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="maxSegmentSize"/> is less than <see cref="RecordWriter.FramingOverhead"/>.
@@ -85,7 +90,8 @@ public sealed class SegmentWriter : IDisposable
     /// <exception cref="DirectoryNotFoundException">
     /// <paramref name="segmentsDirectory"/> does not exist.
     /// </exception>
-    public SegmentWriter(string segmentsDirectory, uint segmentId, long maxSegmentSize)
+    public SegmentWriter(string segmentsDirectory, uint segmentId, long maxSegmentSize,
+        CompressionAlgorithm compression = CompressionAlgorithm.None)
     {
         ArgumentNullException.ThrowIfNull(segmentsDirectory);
 
@@ -107,6 +113,7 @@ public sealed class SegmentWriter : IDisposable
 
         SegmentId = segmentId;
         _maxSegmentSize = maxSegmentSize;
+        _compression = compression;
 
         string path = SegmentNaming.GetFilePath(segmentsDirectory, segmentId);
 
@@ -156,7 +163,7 @@ public sealed class SegmentWriter : IDisposable
         }
 
         long offset = _bytesWritten;
-        long written = RecordWriter.Write(_stream, payload, seqNo, contentType, flags, schemaId);
+        long written = RecordWriter.Write(_stream, payload, seqNo, contentType, flags, schemaId, _compression);
         // Single-writer invariant: only Pipeline.Append calls this method, always on the
         // main thread. Volatile.Read on the RHS is required for correctness under the C#
         // memory model and guards against a second writer path being added in the future.

@@ -188,7 +188,7 @@ public sealed class PipelineMetricsTests
 
         listener.Dispose();
 
-        totals.GetValueOrDefault("pecl.records.appended").Should().Be(5L);
+        totals.GetValueOrDefault("pecl.write.records_total").Should().Be(5L);
     }
 
     [Fact]
@@ -207,7 +207,7 @@ public sealed class PipelineMetricsTests
 
         listener.Dispose();
 
-        totals.GetValueOrDefault("pecl.bytes.appended").Should().Be(60L);
+        totals.GetValueOrDefault("pecl.write.bytes_total").Should().Be(60L);
     }
 
     [Trait("Category", "Integration")]
@@ -242,7 +242,7 @@ public sealed class PipelineMetricsTests
         pipeline.Stop();
         listener.Dispose();
 
-        totals.GetValueOrDefault("pecl.segments.deleted").Should().BeGreaterThan(0L);
+        totals.GetValueOrDefault("pecl.segment.deleted").Should().BeGreaterThan(0L);
     }
 
     [Trait("Category", "Integration")]
@@ -446,9 +446,9 @@ public sealed class PipelineMetricsTests
         listener1.Dispose();
         listener2.Dispose();
 
-        totals1.GetValueOrDefault("pecl.records.appended").Should().Be(2L,
+        totals1.GetValueOrDefault("pecl.write.records_total").Should().Be(2L,
             "pipeline-1 appended 2 records — listener-1 must see exactly 2");
-        totals2.GetValueOrDefault("pecl.records.appended").Should().Be(1L,
+        totals2.GetValueOrDefault("pecl.write.records_total").Should().Be(1L,
             "pipeline-2 appended 1 record — listener-2 must see exactly 1");
     }
 
@@ -541,5 +541,382 @@ public sealed class PipelineMetricsTests
 
         totals2["pecl.consumer.lag"].Should().Be(0L,
             "consumer has read all 3 records so lag must be zero");
+    }
+
+    // ─── Extended metrics (PHASE-13-02) ──────────────────────────────────────────
+
+    /// <summary>
+    /// Creates a <see cref="MeterListener"/> that collects individual <see cref="double"/>
+    /// measurements for a single named instrument.
+    /// </summary>
+    private static (MeterListener Listener, List<double> Measurements) SetupDoubleListListener(
+        string meterName, string instrumentName)
+    {
+        var measurements = new List<double>();
+        var listener = new MeterListener();
+
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == meterName && instrument.Name == instrumentName)
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+
+        listener.SetMeasurementEventCallback<double>((instrument, value, tags, state) =>
+        {
+            lock (measurements)
+            {
+                measurements.Add(value);
+            }
+        });
+
+        listener.Start();
+        return (listener, measurements);
+    }
+
+    /// <summary>
+    /// Creates a <see cref="MeterListener"/> that collects individual <see cref="long"/>
+    /// measurements for a single named instrument.
+    /// </summary>
+    private static (MeterListener Listener, List<long> LongMeasurements) SetupLongListListener(
+        string meterName, string instrumentName)
+    {
+        var measurements = new List<long>();
+        var listener = new MeterListener();
+
+        listener.InstrumentPublished = (instrument, l) =>
+        {
+            if (instrument.Meter.Name == meterName && instrument.Name == instrumentName)
+            {
+                l.EnableMeasurementEvents(instrument);
+            }
+        };
+
+        listener.SetMeasurementEventCallback<long>((instrument, value, tags, state) =>
+        {
+            lock (measurements)
+            {
+                measurements.Add(value);
+            }
+        });
+
+        listener.Start();
+        return (listener, measurements);
+    }
+
+    /// <summary>
+    /// Each <see cref="PeclPipeline.Flush"/> records exactly one <c>pecl.write.fsync_duration</c>
+    /// measurement ≥ 0 ms (the wall-clock time of the <c>FlushToDisk</c> call).
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_FsyncDuration_RecordedOnFlush()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-fsd-{Guid.NewGuid():N}",
+        };
+        var (listener, measurements) = SetupDoubleListListener(config.MeterName, "pecl.write.fsync_duration");
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start();
+        pipeline.Append("data"u8);
+        pipeline.Flush();
+
+        listener.Dispose();
+
+        measurements.Should().HaveCount(1, "exactly one fsync per Flush() call");
+        measurements[0].Should().BeGreaterThanOrEqualTo(0d);
+    }
+
+    /// <summary>
+    /// Each <see cref="PeclPipeline.Flush"/> records one <c>pecl.write.batch_size</c>
+    /// measurement equal to the number of records appended since the previous flush.
+    /// A flush with no preceding appends records a value of zero.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_BatchSize_RecordedOnFlush()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-bs-{Guid.NewGuid():N}",
+        };
+        var (listener, measurements) = SetupLongListListener(config.MeterName, "pecl.write.batch_size");
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start();
+
+        for (int i = 0; i < 5; i++)
+        {
+            pipeline.Append("x"u8);
+        }
+
+        pipeline.Flush();   // batch of 5 → first measurement
+
+        pipeline.Flush();   // no appends → second measurement of 0
+
+        listener.Dispose();
+
+        measurements.Should().HaveCount(2, "one measurement per Flush() call");
+        measurements[0].Should().Be(5L, "5 records were appended before the first flush");
+        measurements[1].Should().Be(0L, "no records were appended before the second flush");
+    }
+
+    /// <summary>
+    /// <see cref="PipelineMetrics.RecoveryDurationMs"/> is ≥ 0 immediately after
+    /// <see cref="PeclPipeline.Start"/> and the <c>pecl.recovery.duration</c>
+    /// observable gauge publishes the same non-negative value.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_RecoveryDuration_GreaterThanOrEqualToZero()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-rd-{Guid.NewGuid():N}",
+        };
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start();
+
+        pipeline.Metrics.RecoveryDurationMs.Should().BeGreaterThanOrEqualTo(0L);
+
+        // SetupListener AFTER pipeline.Start() — observable gauges are registered in StartObservableInstruments.
+        var (listener, totals) = SetupListener(config.MeterName);
+        listener.RecordObservableInstruments();
+        listener.Dispose();
+
+        totals.Should().ContainKey("pecl.recovery.duration",
+            "pecl.recovery.duration must be registered as an observable gauge");
+        totals["pecl.recovery.duration"].Should().BeGreaterThanOrEqualTo(0L);
+    }
+
+    /// <summary>
+    /// The <c>pecl.recovery.truncated_bytes</c> observable gauge is published after a
+    /// clean start (no truncation) with a value of zero.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_RecoveryTruncatedBytes_PublishedAsObservableGauge()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-rtb-{Guid.NewGuid():N}",
+        };
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start(); // clean start — no truncation needed
+
+        // SetupListener AFTER pipeline.Start() — see feedback-meterlistener-setup.md.
+        var (listener, totals) = SetupListener(config.MeterName);
+        listener.RecordObservableInstruments();
+        listener.Dispose();
+
+        totals.Should().ContainKey("pecl.recovery.truncated_bytes",
+            "pecl.recovery.truncated_bytes must be registered as an observable gauge");
+        totals["pecl.recovery.truncated_bytes"].Should().Be(0L,
+            "no truncation occurred during a clean start");
+    }
+
+    /// <summary>
+    /// <see cref="PipelineMetrics.SegmentBytes"/> is ≥ 0 immediately after
+    /// <see cref="PeclPipeline.Start"/> (set during recovery) and decreases after a
+    /// GC pass deletes sealed segments once the consumer has advanced past them.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_SegmentBytes_UpdatedAfterStartAndGcPass()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-sb-{Guid.NewGuid():N}",
+            MaxSegmentSize = 512,
+            GcIntervalMs = 50,
+        };
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.RegisterConsumer("c");
+        pipeline.Start();
+
+        // SegmentBytes is set at the end of RecoverInternal — must be ≥ 0 immediately.
+        pipeline.Metrics.SegmentBytes.Should().BeGreaterThanOrEqualTo(0L,
+            "SegmentBytes is initialised during recovery before any GC pass");
+
+        // Write enough records to trigger multiple segment rollovers.
+        while (pipeline.Metrics.SegmentRollovers < 3)
+        {
+            pipeline.Append("fill-payload"u8);
+        }
+
+        pipeline.Flush();
+
+        // Advance the consumer cursor so ConsumerGated GC can delete sealed segments.
+        while (pipeline.ReadNext("c").IsSuccess) { }
+
+        // Poll until GC has fired and deleted at least one sealed segment.
+        // SegmentsDeleted is only incremented when a segment file is actually removed —
+        // a true signal that the GC path executed, not a time proxy.
+        int waited = 0;
+        while (pipeline.Metrics.SegmentsDeleted == 0 && waited < 5000)
+        {
+            Thread.Sleep(20);
+            waited += 20;
+        }
+
+        pipeline.Metrics.SegmentsDeleted.Should().BeGreaterThan(0,
+            "ConsumerGated GC must delete sealed segments once the consumer has advanced past them");
+        pipeline.Metrics.SegmentBytes.Should().BeGreaterThan(0L,
+            "at least the active segment must contribute non-zero bytes after GC");
+    }
+
+    // ─── REVIEW-13 MEDIUM-1: Strict-mode histogram coverage ─────────────────────
+
+    /// <summary>
+    /// In <see cref="DurabilityMode.Strict"/> each <see cref="PeclPipeline.Append"/> performs
+    /// its own fsync. <c>pecl.write.fsync_duration</c> must receive one measurement per append.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_FsyncDuration_RecordedInStrictMode()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-fsd-strict-{Guid.NewGuid():N}",
+            DurabilityMode = DurabilityMode.Strict,
+        };
+        var (listener, measurements) = SetupDoubleListListener(config.MeterName, "pecl.write.fsync_duration");
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start();
+        pipeline.Append("a"u8);
+        pipeline.Append("b"u8);
+        pipeline.Append("c"u8);
+
+        listener.Dispose();
+
+        measurements.Should().HaveCount(3, "one fsync measurement per Append in Strict mode");
+        measurements.Should().AllSatisfy(v => v.Should().BeGreaterThanOrEqualTo(0d));
+    }
+
+    /// <summary>
+    /// In <see cref="DurabilityMode.Strict"/> each append is a single-record batch.
+    /// <c>pecl.write.batch_size</c> must emit value 1 per append.
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_BatchSize_RecordedInStrictMode()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-bs-strict-{Guid.NewGuid():N}",
+            DurabilityMode = DurabilityMode.Strict,
+        };
+        var (listener, measurements) = SetupLongListListener(config.MeterName, "pecl.write.batch_size");
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.Start();
+        pipeline.Append("a"u8);
+        pipeline.Append("b"u8);
+        pipeline.Append("c"u8);
+
+        listener.Dispose();
+
+        measurements.Should().HaveCount(3, "one batch_size measurement per Append in Strict mode");
+        measurements.Should().AllBeEquivalentTo(1L, "each Strict-mode flush covers exactly 1 record");
+    }
+
+    // ─── REVIEW-13 MEDIUM-2: ConsumerGated early-return ──────────────────────────
+
+    /// <summary>
+    /// When <see cref="RetentionPolicy.ConsumerGated"/> is active and no consumers are
+    /// registered, <see cref="PipelineMetrics.SegmentBytes"/> must still be updated by
+    /// each GC pass (it must not remain stale at the value set during recovery).
+    /// </summary>
+    [Trait("Category", "Integration")]
+    [Fact]
+    public void Metrics_SegmentBytes_UpdatedByGcPass_NoConsumers()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration
+        {
+            RootDirectory = dir.Path,
+            MeterName = $"pecl-sb-nc-{Guid.NewGuid():N}",
+            MaxSegmentSize = 512,
+            GcIntervalMs = 50,
+            RetentionPolicy = RetentionPolicy.ConsumerGated,
+        };
+
+        using var pipeline = new PeclPipeline(config); // no consumers registered
+        pipeline.Start();
+
+        // Fresh directory: RecoverInternal finds no segments → sets SegmentBytes = 0.
+        // This is the only assertion that proves the subsequent > 0 comes from the GC
+        // path and not from RecoverInternal.
+        pipeline.Metrics.SegmentBytes.Should().Be(0L,
+            "fresh directory has no segment files; RecoverInternal sets SegmentBytes to 0");
+
+        // Write enough to trigger rollovers so segments exist on disk.
+        while (pipeline.Metrics.SegmentRollovers < 2)
+        {
+            pipeline.Append("fill-payload"u8);
+        }
+
+        pipeline.Flush();
+
+        // Poll until GC fires and calls SetSegmentBytes. With no consumers,
+        // ConsumerGated skips deletions but must still update SegmentBytes (MEDIUM-2 fix).
+        // The only path from 0 → > 0 at this point is the GC update.
+        int waited = 0;
+        while (pipeline.Metrics.SegmentBytes == 0L && waited < 5000)
+        {
+            Thread.Sleep(20);
+            waited += 20;
+        }
+
+        pipeline.Metrics.SegmentBytes.Should().BeGreaterThan(0L,
+            "SegmentBytes must be set by the GC pass even when no consumers are registered");
+    }
+
+    // ── Consumer read rate ────────────────────────────────────────────────────
+
+    [Fact]
+    public void ConsumerReadRate_Counter_IncrementOnReadNext()
+    {
+        using var dir = new TempDirectory();
+        var config = new PipelineConfiguration { RootDirectory = dir.Path, MeterName = "pecl-rr" };
+        var (listener, totals) = SetupListener(config.MeterName);
+
+        using var pipeline = new PeclPipeline(config);
+        pipeline.RegisterConsumer("c");
+        pipeline.Start();
+
+        pipeline.Append("a"u8);
+        pipeline.Append("b"u8);
+        pipeline.Append("c"u8);
+        pipeline.Flush();
+
+        while (pipeline.ReadNext("c").IsSuccess) { }
+
+        listener.Dispose();
+
+        totals.GetValueOrDefault("pecl.consumer.read_rate").Should().Be(3L,
+            "each successful ReadNext must increment the pecl.consumer.read_rate counter");
+        pipeline.Metrics.ConsumerReadRate.Should().Be(3L);
     }
 }
