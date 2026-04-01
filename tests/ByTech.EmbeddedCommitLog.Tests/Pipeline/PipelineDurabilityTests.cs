@@ -173,7 +173,12 @@ public sealed class PipelineDurabilityTests
 
         pipeline.Append("batched"u8);
 
-        Thread.Sleep(200); // allow at least 3 timer ticks (FsyncIntervalMs = 50 ms)
+        // Poll until the timer fires — up to 5 s to tolerate slow CI runners.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (pipeline.Metrics.FlushCount == 0 && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(50);
+        }
 
         // No explicit Flush() — timer must have incremented FlushCount
         pipeline.Metrics.FlushCount.Should().BeGreaterThan(0);

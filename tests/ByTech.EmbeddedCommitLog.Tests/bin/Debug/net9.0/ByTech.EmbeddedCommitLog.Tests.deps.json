@@ -8,7 +8,7 @@
     ".NETCoreApp,Version=v9.0": {
       "ByTech.EmbeddedCommitLog.Tests/1.0.0": {
         "dependencies": {
-          "ByTech.EmbeddedCommitLog": "1.0.0",
+          "ByTech.EmbeddedCommitLog": "1.1.0",
           "ByTech.EmbeddedCommitLog.TestUtilities": "1.0.0",
           "FluentAssertions": "7.0.0",
           "System.IO.Hashing": "9.0.0",
@@ -328,20 +328,20 @@
           }
         }
       },
-      "ByTech.EmbeddedCommitLog/1.0.0": {
+      "ByTech.EmbeddedCommitLog/1.1.0": {
         "dependencies": {
           "System.IO.Hashing": "9.0.0"
         },
         "runtime": {
           "ByTech.EmbeddedCommitLog.dll": {
-            "assemblyVersion": "1.0.0.0",
-            "fileVersion": "1.0.0.0"
+            "assemblyVersion": "1.1.0.0",
+            "fileVersion": "1.1.0.0"
           }
         }
       },
       "ByTech.EmbeddedCommitLog.TestUtilities/1.0.0": {
         "dependencies": {
-          "ByTech.EmbeddedCommitLog": "1.0.0",
+          "ByTech.EmbeddedCommitLog": "1.1.0",
           "FluentAssertions": "7.0.0",
           "xunit.v3": "1.0.0"
         },
@@ -507,7 +507,7 @@
       "path": "xunit.v3.runner.inproc.console/1.0.0",
       "hashPath": "xunit.v3.runner.inproc.console.1.0.0.nupkg.sha512"
     },
-    "ByTech.EmbeddedCommitLog/1.0.0": {
+    "ByTech.EmbeddedCommitLog/1.1.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

@@ -460,7 +460,7 @@
           }
         }
       },
-      "ByTech.EmbeddedCommitLog/1.0.0": {
+      "ByTech.EmbeddedCommitLog/1.1.0": {
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
         "dependencies": {
@@ -477,7 +477,7 @@
         "type": "project",
         "framework": ".NETCoreApp,Version=v9.0",
         "dependencies": {
-          "ByTech.EmbeddedCommitLog": "1.0.0",
+          "ByTech.EmbeddedCommitLog": "1.1.0",
           "FluentAssertions": "7.0.0",
           "xunit.v3": "1.0.0"
         },
@@ -1120,7 +1120,7 @@
         "xunit.v3.runner.inproc.console.nuspec"
       ]
     },
-    "ByTech.EmbeddedCommitLog/1.0.0": {
+    "ByTech.EmbeddedCommitLog/1.1.0": {
       "type": "project",
       "path": "../../src/ByTech.EmbeddedCommitLog/ByTech.EmbeddedCommitLog.csproj",
       "msbuildProject": "../../src/ByTech.EmbeddedCommitLog/ByTech.EmbeddedCommitLog.csproj"
@@ -1133,7 +1133,7 @@
   },
   "projectFileDependencyGroups": {
     "net9.0": [
-      "ByTech.EmbeddedCommitLog >= 1.0.0",
+      "ByTech.EmbeddedCommitLog >= 1.1.0",
       "ByTech.EmbeddedCommitLog.TestUtilities >= 1.0.0",
       "FluentAssertions >= 7.0.0",
       "System.IO.Hashing >= 9.0.0",
