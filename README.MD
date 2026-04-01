@@ -3,8 +3,8 @@
 [![NuGet](https://img.shields.io/nuget/v/ByTech.EmbeddedCommitLog)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.MD)
 [![.NET 9](https://img.shields.io/badge/.NET-9.0-purple)](https://dotnet.microsoft.com/en-us/download/dotnet/9)
-[![Build](https://img.shields.io/github/actions/workflow/status/bbajt/csharp-code-map/ci.yml?branch=main&label=build)](https://github.com/bbajt/csharp-code-map/actions)
-[![Tests](https://img.shields.io/github/actions/workflow/status/bbajt/csharp-code-map/ci.yml?branch=main&label=tests)](https://github.com/bbajt/csharp-code-map/actions)
+
+
 **PECL** — Persisted Embedded Commit Log. A Kafka-inspired, crash-safe, append-only
 log that runs entirely in-process. No broker. No network. No ops overhead.
 
