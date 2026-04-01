@@ -40,7 +40,7 @@ jobs:
       - name: Run tests
         if: steps.detect-tests.outputs.has_tests == 'true'
         run: |
-          dotnet test EmbeddedCommitLog.sln --no-build \
+          dotnet test EmbeddedCommitLog.sln \
             --logger "trx;LogFileName=results.trx" \
             --results-directory ./TestResults
 
