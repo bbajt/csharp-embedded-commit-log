@@ -507,6 +507,11 @@ public sealed class Pipeline : IDisposable
             }
 
             // ── Push-mode drain ───────────────────────────────────────────────
+            // Cancel the GC task before starting the drain so it cannot delete
+            // segments that reader loops are about to open. ExecuteCleanupSequence
+            // waits for the task and disposes the CTS as usual.
+            _gcCts?.Cancel();
+
             // 1. Cancel reader loops so they drain to tail then exit.
             foreach (ConsumerState cs in _consumers.Values)
             {
