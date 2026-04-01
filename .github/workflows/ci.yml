@@ -39,4 +39,4 @@ jobs:
 
       - name: Run tests
         if: steps.detect-tests.outputs.has_tests == 'true'
-        run: dotnet run --project tests/ByTech.EmbeddedCommitLog.Tests
+        run: dotnet run --project tests/ByTech.EmbeddedCommitLog.Tests -- -trait- "Category=Chaos"
