@@ -4,7 +4,7 @@
 [![NuGet Downloads](https://img.shields.io/nuget/dt/ByTech.EmbeddedCommitLog?color=blue)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
 [![.NET](https://img.shields.io/badge/.NET-10-512BD4)](#)
 [![License](https://img.shields.io/badge/license-Apache_2.0-orange.svg)](LICENSE.MD)
-[![GitHub Stars](https://img.shields.io/github/stars/bbajt/EmbeddedCommitLog?style=social)](https://github.com/bbajt/EmbeddedCommitLog/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/bbajt/csharp-embedded-commit-log?style=social)](https://github.com/bbajt/csharp-embedded-commit-log/stargazers)
 
 
 **PECL** — Persisted Embedded Commit Log. A Kafka-inspired, crash-safe, append-only
