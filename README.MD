@@ -1,14 +1,16 @@
 # Persistent Embedded Commit Log (PECL)
 
-[![NuGet](https://img.shields.io/nuget/v/ByTech.EmbeddedCommitLog)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE.MD)
-[![.NET 9](https://img.shields.io/badge/.NET-9.0-purple)](https://dotnet.microsoft.com/en-us/download/dotnet/9)
+[![NuGet](https://img.shields.io/nuget/v/ByTech.EmbeddedCommitLog?label=nuget&color=blue)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/ByTech.EmbeddedCommitLog?color=blue)](https://www.nuget.org/packages/ByTech.EmbeddedCommitLog)
+[![.NET](https://img.shields.io/badge/.NET-10-512BD4)](#)
+[![License](https://img.shields.io/badge/license-Apache_2.0-orange.svg)](LICENSE.MD)
+[![GitHub Stars](https://img.shields.io/github/stars/bbajt/EmbeddedCommitLog?style=social)](https://github.com/bbajt/EmbeddedCommitLog/stargazers)
 
 
 **PECL** — Persisted Embedded Commit Log. A Kafka-inspired, crash-safe, append-only
 log that runs entirely in-process. No broker. No network. No ops overhead.
 
-Targets **500K+ records/sec** on NVMe with batched durability on .NET 9.
+Targets **500K+ records/sec** on NVMe with batched durability on .NET 10.
 
 ---
 
@@ -33,7 +35,7 @@ process — without standing up a broker.
 dotnet add package ByTech.EmbeddedCommitLog
 ```
 
-Requires **.NET 9.0** or later.
+Requires **.NET 10.0** or later.
 
 ---
 
@@ -380,7 +382,7 @@ Observable via OpenTelemetry, dotnet-monitor, or any `MeterListener`.
 ## Performance
 
 Benchmarks: Intel Core i9-14900K, 64 GB RAM, NVMe 2 TB, Windows 11,
-.NET 9.0.14, BenchmarkDotNet v0.14.0, Release build.
+.NET 10.0, BenchmarkDotNet v0.15.8, Release build.
 
 | Scenario | Records/sec | Payload | Durability |
 |----------|-------------|---------|------------|

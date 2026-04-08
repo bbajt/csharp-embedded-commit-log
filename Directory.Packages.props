@@ -4,15 +4,16 @@
   </PropertyGroup>
 
   <ItemGroup Label="Core">
-    <PackageVersion Include="System.IO.Hashing" Version="9.0.0" />
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.5" />
   </ItemGroup>
 
   <ItemGroup Label="Testing">
-    <PackageVersion Include="xunit.v3" Version="1.0.0" />
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.v3.extensibility.core" Version="3.2.2" />
     <PackageVersion Include="FluentAssertions" Version="7.0.0" />
   </ItemGroup>
 
   <ItemGroup Label="Benchmarking">
-    <PackageVersion Include="BenchmarkDotNet" Version="0.14.0" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
   </ItemGroup>
 </Project>

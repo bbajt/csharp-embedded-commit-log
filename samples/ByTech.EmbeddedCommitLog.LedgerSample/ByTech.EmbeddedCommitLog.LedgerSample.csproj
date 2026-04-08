@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <RootNamespace>ByTech.EmbeddedCommitLog.LedgerSample</RootNamespace>
     <OutputType>Exe</OutputType>
     <!-- TargetFramework, Nullable, TreatWarningsAsErrors inherited from Directory.Build.props -->
   </PropertyGroup>
